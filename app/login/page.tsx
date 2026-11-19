@@ -86,14 +86,18 @@ function LoginContent() {
         setError(
           'Domain ini belum terdaftar pada Firebase Authorized Domains. Gunakan akun lokal sekolah di formulir ini.'
         );
-      } else if (msg.includes('operation-not-allowed')) {
+      } else if (msg.includes('operation-not-allowed') || msg.includes('configuration-not-found') || msg.includes('CONFIGURATION_NOT_FOUND')) {
         setError(
-          'Masuk dengan Google belum diaktifkan di proyek Firebase. Gunakan akun lokal sekolah di formulir ini.'
+          'Masuk dengan Google belum diaktifkan di proyek Firebase. Silakan buka Firebase Console > Authentication > Sign-in method > aktifkan Google.'
         );
       } else if (msg.includes('email-not-verified')) {
         setError('Email akun Google Anda belum terverifikasi sehingga tidak dapat masuk.');
       } else if (msg.includes('network-request-failed')) {
         setError('Koneksi ke layanan Google gagal. Periksa internet Anda atau gunakan akun lokal sekolah.');
+      } else if (msg.includes('permission-denied') || msg.includes('Missing or insufficient permissions')) {
+        setError(
+          'Akses Firestore ditolak (Security Rules belum di-deploy di Firebase Console). Silakan gunakan akun lokal sekolah di formulir bawah ini.'
+        );
       } else {
         setError('Gagal masuk dengan akun Google. Pastikan koneksi internet aktif atau gunakan akun lokal sekolah.');
       }
