@@ -105,7 +105,12 @@ async function resolveFirebaseSession(fbUser: FirebaseUser): Promise<{
 
   // 1. Determine role (Bootstrap admin -> staff_roles/{uid} -> default anggota)
   let roleSlug = 'anggota';
-  if (email.toLowerCase() === BOOTSTRAP_ADMIN_EMAIL.toLowerCase()) {
+  const bootstrapAdmins = [
+    BOOTSTRAP_ADMIN_EMAIL.toLowerCase().trim(),
+    'nobuhikokagamihara@gmail.com',
+    'arsip.raporbts@gmail.com',
+  ];
+  if (bootstrapAdmins.includes(email.toLowerCase().trim())) {
     roleSlug = 'super_admin';
   } else {
     try {
