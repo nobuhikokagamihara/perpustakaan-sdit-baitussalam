@@ -1,0 +1,881 @@
+{
+  "entities": {
+    "TestConnection": {
+      "title": "TestConnection",
+      "description": "Dokumen uji konektivitas startup Firestore.",
+      "type": "object",
+      "properties": {
+        "ok": { "type": "boolean" },
+        "checkedAt": { "type": "string", "format": "date-time", "maxLength": 64 }
+      },
+      "required": ["ok"]
+    },
+    "StaffRole": {
+      "title": "StaffRole",
+      "description": "Penetapan peran staf perpustakaan untuk akun Google terverifikasi.",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "email": { "type": "string", "format": "email", "minLength": 3, "maxLength": 160 },
+        "fullName": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "role": { "type": "string", "enum": ["super_admin", "kepala_perpustakaan", "pustakawan", "anggota"] },
+        "isActive": { "type": "boolean" },
+        "assignedByUid": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["uid", "email", "fullName", "role", "isActive", "assignedByUid", "createdAt", "updatedAt"]
+    },
+    "UserProfile": {
+      "title": "UserProfile",
+      "description": "Profil pengguna Google Auth yang terhubung dengan keanggotaan perpustakaan SD.",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "email": { "type": "string", "format": "email", "minLength": 3, "maxLength": 160 },
+        "fullName": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "role": { "type": "string", "enum": ["super_admin", "kepala_perpustakaan", "pustakawan", "anggota"] },
+        "memberId": { "type": "string", "maxLength": 128 },
+        "memberCode": { "type": "string", "maxLength": 64 },
+        "isActive": { "type": "boolean" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["uid", "email", "fullName", "role", "isActive", "createdAt", "updatedAt"]
+    },
+    "PublicCatalogItem": {
+      "title": "PublicCatalogItem",
+      "description": "Proyeksi katalog publik OPAC tanpa data pribadi anggota maupun data internal.",
+      "type": "object",
+      "properties": {
+        "numericId": { "type": "number" },
+        "title": { "type": "string", "minLength": 1, "maxLength": 240 },
+        "subtitle": { "type": "string", "maxLength": 240 },
+        "seriesName": { "type": "string", "maxLength": 160 },
+        "volume": { "type": "string", "maxLength": 60 },
+        "isbn": { "type": "string", "maxLength": 40 },
+        "edition": { "type": "string", "maxLength": 80 },
+        "publishYear": { "type": "number" },
+        "publishCity": { "type": "string", "maxLength": 100 },
+        "language": { "type": "string", "maxLength": 60 },
+        "description": { "type": "string", "maxLength": 2000 },
+        "tableOfContents": { "type": "string", "maxLength": 2000 },
+        "pages": { "type": "number" },
+        "dimensions": { "type": "string", "maxLength": 80 },
+        "bindingType": { "type": "string", "maxLength": 80 },
+        "illustrationNotes": { "type": "string", "maxLength": 160 },
+        "coverUrl": { "type": "string", "maxLength": 1000 },
+        "categoryId": { "type": "string", "maxLength": 128 },
+        "categoryName": { "type": "string", "maxLength": 120 },
+        "publisherName": { "type": "string", "maxLength": 120 },
+        "authors": { "type": "string", "maxLength": 200 },
+        "illustrator": { "type": "string", "maxLength": 160 },
+        "editor": { "type": "string", "maxLength": 160 },
+        "translator": { "type": "string", "maxLength": 160 },
+        "subcategory": { "type": "string", "maxLength": 120 },
+        "ddcCode": { "type": "string", "maxLength": 40 },
+        "callNumber": { "type": "string", "maxLength": 60 },
+        "subjects": { "type": "string", "maxLength": 300 },
+        "targetGrade": { "type": "string", "maxLength": 80 },
+        "ageRange": { "type": "string", "maxLength": 60 },
+        "isReferenceOnly": { "type": "boolean" },
+        "readInPlaceOnly": { "type": "boolean" },
+        "isFeatured": { "type": "boolean" },
+        "totalCopies": { "type": "number" },
+        "availableCopies": { "type": "number" },
+        "shelfLocations": { "type": "string", "maxLength": 240 },
+        "borrowCount": { "type": "number" },
+        "archived": { "type": "boolean" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": [
+        "numericId",
+        "title",
+        "publishYear",
+        "isReferenceOnly",
+        "readInPlaceOnly",
+        "totalCopies",
+        "availableCopies",
+        "borrowCount",
+        "archived",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "Book": {
+      "title": "Book",
+      "description": "Data bibliografi induk koleksi buku Perpustakaan SD Lentera Pustaka.",
+      "type": "object",
+      "properties": {
+        "numericId": { "type": "number" },
+        "title": { "type": "string", "minLength": 1, "maxLength": 240 },
+        "subtitle": { "type": "string", "maxLength": 240 },
+        "seriesName": { "type": "string", "maxLength": 160 },
+        "volume": { "type": "string", "maxLength": 60 },
+        "isbn": { "type": "string", "maxLength": 40 },
+        "edition": { "type": "string", "maxLength": 80 },
+        "publishYear": { "type": "number" },
+        "publishCity": { "type": "string", "maxLength": 100 },
+        "language": { "type": "string", "maxLength": 60 },
+        "description": { "type": "string", "maxLength": 2000 },
+        "tableOfContents": { "type": "string", "maxLength": 2000 },
+        "pages": { "type": "number" },
+        "dimensions": { "type": "string", "maxLength": 80 },
+        "bindingType": { "type": "string", "maxLength": 80 },
+        "paperType": { "type": "string", "maxLength": 80 },
+        "weightGrams": { "type": "number" },
+        "illustrationNotes": { "type": "string", "maxLength": 160 },
+        "coverUrl": { "type": "string", "maxLength": 1000 },
+        "price": { "type": "number" },
+        "categoryId": { "type": "string", "maxLength": 128 },
+        "categoryName": { "type": "string", "maxLength": 120 },
+        "publisherName": { "type": "string", "maxLength": 120 },
+        "authors": { "type": "string", "maxLength": 200 },
+        "illustrator": { "type": "string", "maxLength": 160 },
+        "editor": { "type": "string", "maxLength": 160 },
+        "translator": { "type": "string", "maxLength": 160 },
+        "subcategory": { "type": "string", "maxLength": 120 },
+        "ddcCode": { "type": "string", "maxLength": 40 },
+        "callNumber": { "type": "string", "maxLength": 60 },
+        "subjects": { "type": "string", "maxLength": 300 },
+        "targetGrade": { "type": "string", "maxLength": 80 },
+        "ageRange": { "type": "string", "maxLength": 60 },
+        "acquisitionSource": { "type": "string", "maxLength": 120 },
+        "isReferenceOnly": { "type": "boolean" },
+        "readInPlaceOnly": { "type": "boolean" },
+        "isFeatured": { "type": "boolean" },
+        "acquisitionDate": { "type": "string", "maxLength": 32 },
+        "borrowCount": { "type": "number" },
+        "archived": { "type": "boolean" },
+        "createdByUid": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": [
+        "numericId",
+        "title",
+        "publishYear",
+        "price",
+        "isReferenceOnly",
+        "readInPlaceOnly",
+        "archived",
+        "createdByUid",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "BookCopy": {
+      "title": "BookCopy",
+      "description": "Eksemplar fisik buku dengan kode inventaris, barcode, rak, kondisi, dan status peminjaman unik.",
+      "type": "object",
+      "properties": {
+        "numericId": { "type": "number" },
+        "bookId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "bookTitle": { "type": "string", "minLength": 1, "maxLength": 240 },
+        "inventoryCode": { "type": "string", "minLength": 1, "maxLength": 64 },
+        "barcode": { "type": "string", "minLength": 1, "maxLength": 64 },
+        "shelfId": { "type": "string", "maxLength": 128 },
+        "shelfCode": { "type": "string", "maxLength": 64 },
+        "shelfName": { "type": "string", "maxLength": 120 },
+        "condition": { "type": "string", "enum": ["Baik", "Rusak Ringan", "Rusak Berat", "Hilang"] },
+        "status": { "type": "string", "enum": ["Tersedia", "Dipinjam", "Direservasi", "Perbaikan", "Hilang", "Dihapus"] },
+        "acquisitionDate": { "type": "string", "maxLength": 32 },
+        "price": { "type": "number" },
+        "notes": { "type": "string", "maxLength": 500 },
+        "archived": { "type": "boolean" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": [
+        "numericId",
+        "bookId",
+        "bookTitle",
+        "inventoryCode",
+        "barcode",
+        "condition",
+        "status",
+        "price",
+        "archived",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "Member": {
+      "title": "Member",
+      "description": "Data keanggotaan siswa, guru, staf, dan komite sekolah SD (terisolasi PII).",
+      "type": "object",
+      "properties": {
+        "numericId": { "type": "number" },
+        "memberCode": { "type": "string", "minLength": 1, "maxLength": 64 },
+        "fullName": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "membershipTypeId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "membershipTypeName": { "type": "string", "minLength": 1, "maxLength": 100 },
+        "identityNumber": { "type": "string", "maxLength": 64 },
+        "gender": { "type": "string", "enum": ["Laki-laki", "Perempuan", "Tidak Disebutkan"] },
+        "unitOrClass": { "type": "string", "maxLength": 100 },
+        "address": { "type": "string", "maxLength": 300 },
+        "phone": { "type": "string", "maxLength": 40 },
+        "email": { "type": "string", "maxLength": 160 },
+        "registeredAt": { "type": "string", "maxLength": 32 },
+        "expiresAt": { "type": "string", "maxLength": 32 },
+        "status": { "type": "string", "enum": ["Aktif", "Nonaktif", "Diblokir"] },
+        "blockReason": { "type": "string", "maxLength": 300 },
+        "ownerUid": { "type": "string", "maxLength": 128 },
+        "archived": { "type": "boolean" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": [
+        "numericId",
+        "memberCode",
+        "fullName",
+        "membershipTypeId",
+        "membershipTypeName",
+        "registeredAt",
+        "expiresAt",
+        "status",
+        "archived",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "MembershipType": {
+      "title": "MembershipType",
+      "description": "Kebijakan batas pinjam, durasi, perpanjangan, dan tarif denda per jenis anggota SD.",
+      "type": "object",
+      "properties": {
+        "numericId": { "type": "number" },
+        "code": { "type": "string", "minLength": 1, "maxLength": 40 },
+        "name": { "type": "string", "minLength": 1, "maxLength": 100 },
+        "maxLoans": { "type": "number" },
+        "loanDurationDays": { "type": "number" },
+        "maxRenewals": { "type": "number" },
+        "dailyFineRate": { "type": "number" },
+        "maxFineCap": { "type": "number" },
+        "allowReservation": { "type": "boolean" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": [
+        "numericId",
+        "code",
+        "name",
+        "maxLoans",
+        "loanDurationDays",
+        "maxRenewals",
+        "dailyFineRate",
+        "maxFineCap",
+        "allowReservation",
+        "updatedAt"
+      ]
+    },
+    "Category": {
+      "title": "Category",
+      "description": "Kategori koleksi buku perpustakaan SD.",
+      "type": "object",
+      "properties": {
+        "numericId": { "type": "number" },
+        "code": { "type": "string", "minLength": 1, "maxLength": 32 },
+        "name": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["numericId", "code", "name", "createdAt"]
+    },
+    "Location": {
+      "title": "Location",
+      "description": "Lokasi gedung, lantai, dan ruang perpustakaan sekolah.",
+      "type": "object",
+      "properties": {
+        "numericId": { "type": "number" },
+        "code": { "type": "string", "minLength": 1, "maxLength": 32 },
+        "building": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "floor": { "type": "string", "maxLength": 40 },
+        "room": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "description": { "type": "string", "maxLength": 300 },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["numericId", "code", "building", "room", "createdAt"]
+    },
+    "Shelf": {
+      "title": "Shelf",
+      "description": "Rak penyimpanan eksemplar buku di dalam ruangan perpustakaan.",
+      "type": "object",
+      "properties": {
+        "numericId": { "type": "number" },
+        "locationId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "code": { "type": "string", "minLength": 1, "maxLength": 32 },
+        "name": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "capacity": { "type": "number" },
+        "building": { "type": "string", "maxLength": 120 },
+        "room": { "type": "string", "maxLength": 120 },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["numericId", "locationId", "code", "name", "capacity", "createdAt"]
+    },
+    "Loan": {
+      "title": "Loan",
+      "description": "Transaksi peminjaman buku perpustakaan beserta daftar item bounded.",
+      "type": "object",
+      "properties": {
+        "numericId": { "type": "number" },
+        "loanNumber": { "type": "string", "minLength": 1, "maxLength": 64 },
+        "idempotencyKey": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "memberId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "memberCode": { "type": "string", "minLength": 1, "maxLength": 64 },
+        "memberName": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "ownerUid": { "type": "string", "maxLength": 128 },
+        "staffUid": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "staffName": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "loanDate": { "type": "string", "minLength": 8, "maxLength": 32 },
+        "dueDate": { "type": "string", "minLength": 8, "maxLength": 32 },
+        "maxRenewals": { "type": "number" },
+        "status": { "type": "string", "enum": ["Aktif", "Terlambat", "Sebagian Kembali", "Selesai"] },
+        "notes": { "type": "string", "maxLength": 500 },
+        "items": { "type": "array" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": [
+        "numericId",
+        "loanNumber",
+        "idempotencyKey",
+        "memberId",
+        "memberCode",
+        "memberName",
+        "staffUid",
+        "loanDate",
+        "dueDate",
+        "maxRenewals",
+        "status",
+        "items",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "ReturnRecord": {
+      "title": "ReturnRecord",
+      "description": "Catatan pengembalian buku, kondisi fisik, keterlambatan, dan denda.",
+      "type": "object",
+      "properties": {
+        "numericId": { "type": "number" },
+        "returnNumber": { "type": "string", "minLength": 1, "maxLength": 64 },
+        "loanId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "loanNumber": { "type": "string", "minLength": 1, "maxLength": 64 },
+        "copyId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "inventoryCode": { "type": "string", "minLength": 1, "maxLength": 64 },
+        "bookTitle": { "type": "string", "minLength": 1, "maxLength": 240 },
+        "memberId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "memberName": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "ownerUid": { "type": "string", "maxLength": 128 },
+        "staffUid": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "returnedAt": { "type": "string", "minLength": 8, "maxLength": 32 },
+        "condition": { "type": "string", "enum": ["Baik", "Rusak Ringan", "Rusak Berat", "Hilang"] },
+        "status": { "type": "string", "enum": ["Tepat Waktu", "Terlambat", "Rusak", "Hilang"] },
+        "overdueDays": { "type": "number" },
+        "fineAmount": { "type": "number" },
+        "notes": { "type": "string", "maxLength": 500 },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": [
+        "numericId",
+        "returnNumber",
+        "loanId",
+        "loanNumber",
+        "copyId",
+        "inventoryCode",
+        "bookTitle",
+        "memberId",
+        "memberName",
+        "staffUid",
+        "returnedAt",
+        "condition",
+        "status",
+        "overdueDays",
+        "fineAmount",
+        "createdAt"
+      ]
+    },
+    "Reservation": {
+      "title": "Reservation",
+      "description": "Antrean reservasi buku oleh siswa, guru, atau petugas.",
+      "type": "object",
+      "properties": {
+        "numericId": { "type": "number" },
+        "reservationNumber": { "type": "string", "minLength": 1, "maxLength": 64 },
+        "bookId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "bookTitle": { "type": "string", "minLength": 1, "maxLength": 240 },
+        "isbn": { "type": "string", "maxLength": 40 },
+        "copyId": { "type": "string", "maxLength": 128 },
+        "inventoryCode": { "type": "string", "maxLength": 64 },
+        "memberId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "memberCode": { "type": "string", "minLength": 1, "maxLength": 64 },
+        "memberName": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "ownerUid": { "type": "string", "maxLength": 128 },
+        "queuePosition": { "type": "number" },
+        "status": { "type": "string", "enum": ["Menunggu", "Tersedia", "Diambil", "Dibatalkan", "Kedaluwarsa"] },
+        "reservedAt": { "type": "string", "maxLength": 64 },
+        "expiresAt": { "type": "string", "maxLength": 64 },
+        "notes": { "type": "string", "maxLength": 400 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": [
+        "numericId",
+        "reservationNumber",
+        "bookId",
+        "bookTitle",
+        "memberId",
+        "memberCode",
+        "memberName",
+        "queuePosition",
+        "status",
+        "reservedAt",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "Fine": {
+      "title": "Fine",
+      "description": "Tagihan denda keterlambatan, kerusakan, atau kehilangan buku.",
+      "type": "object",
+      "properties": {
+        "numericId": { "type": "number" },
+        "fineNumber": { "type": "string", "minLength": 1, "maxLength": 64 },
+        "memberId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "memberCode": { "type": "string", "minLength": 1, "maxLength": 64 },
+        "memberName": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "ownerUid": { "type": "string", "maxLength": 128 },
+        "loanId": { "type": "string", "maxLength": 128 },
+        "loanNumber": { "type": "string", "maxLength": 64 },
+        "returnId": { "type": "string", "maxLength": 128 },
+        "fineType": { "type": "string", "enum": ["Keterlambatan", "Kerusakan", "Kehilangan"] },
+        "amount": { "type": "number" },
+        "paidAmount": { "type": "number" },
+        "waivedAmount": { "type": "number" },
+        "status": { "type": "string", "enum": ["Belum Lunas", "Sebagian", "Lunas", "Dibebaskan"] },
+        "reason": { "type": "string", "maxLength": 400 },
+        "createdByUid": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": [
+        "numericId",
+        "fineNumber",
+        "memberId",
+        "memberCode",
+        "memberName",
+        "fineType",
+        "amount",
+        "paidAmount",
+        "waivedAmount",
+        "status",
+        "createdByUid",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "Payment": {
+      "title": "Payment",
+      "description": "Riwayat pembayaran denda perpustakaan yang bersifat permanen (append-only).",
+      "type": "object",
+      "properties": {
+        "numericId": { "type": "number" },
+        "paymentNumber": { "type": "string", "minLength": 1, "maxLength": 64 },
+        "fineId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "fineNumber": { "type": "string", "minLength": 1, "maxLength": 64 },
+        "memberId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "memberCode": { "type": "string", "minLength": 1, "maxLength": 64 },
+        "memberName": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "ownerUid": { "type": "string", "maxLength": 128 },
+        "amount": { "type": "number" },
+        "method": { "type": "string", "enum": ["Tunai", "QRIS", "Transfer"] },
+        "receivedByUid": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "receivedByName": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "paidAt": { "type": "string", "maxLength": 64 },
+        "notes": { "type": "string", "maxLength": 400 },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": [
+        "numericId",
+        "paymentNumber",
+        "fineId",
+        "fineNumber",
+        "memberId",
+        "memberCode",
+        "memberName",
+        "amount",
+        "method",
+        "receivedByUid",
+        "receivedByName",
+        "paidAt",
+        "createdAt"
+      ]
+    },
+    "Supplier": {
+      "title": "Supplier",
+      "description": "Data pemasok atau penerbit pengadaan buku sekolah.",
+      "type": "object",
+      "properties": {
+        "numericId": { "type": "number" },
+        "code": { "type": "string", "minLength": 1, "maxLength": 32 },
+        "name": { "type": "string", "minLength": 1, "maxLength": 140 },
+        "contactPerson": { "type": "string", "maxLength": 120 },
+        "phone": { "type": "string", "maxLength": 40 },
+        "email": { "type": "string", "maxLength": 160 },
+        "address": { "type": "string", "maxLength": 300 },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["numericId", "code", "name", "createdAt"]
+    },
+    "Acquisition": {
+      "title": "Acquisition",
+      "description": "Usulan, persetujuan, pemesanan, dan penerimaan pengadaan buku.",
+      "type": "object",
+      "properties": {
+        "numericId": { "type": "number" },
+        "requestNumber": { "type": "string", "minLength": 1, "maxLength": 64 },
+        "titleSummary": { "type": "string", "minLength": 1, "maxLength": 240 },
+        "supplierId": { "type": "string", "maxLength": 128 },
+        "supplierName": { "type": "string", "maxLength": 140 },
+        "requestedByUid": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "requestedByName": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "approvedByUid": { "type": "string", "maxLength": 128 },
+        "approvedByName": { "type": "string", "maxLength": 120 },
+        "orderDate": { "type": "string", "maxLength": 32 },
+        "receivedDate": { "type": "string", "maxLength": 32 },
+        "totalEstimatedCost": { "type": "number" },
+        "status": { "type": "string", "enum": ["Diajukan", "Menunggu Persetujuan", "Disetujui", "Dipesan", "Diterima Sebagian", "Selesai", "Ditolak"] },
+        "notes": { "type": "string", "maxLength": 500 },
+        "items": { "type": "array" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": [
+        "numericId",
+        "requestNumber",
+        "titleSummary",
+        "requestedByUid",
+        "totalEstimatedCost",
+        "status",
+        "items",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "InventoryAudit": {
+      "title": "InventoryAudit",
+      "description": "Sesi audit fisik / stock opname koleksi perpustakaan SD.",
+      "type": "object",
+      "properties": {
+        "numericId": { "type": "number" },
+        "auditNumber": { "type": "string", "minLength": 1, "maxLength": 64 },
+        "title": { "type": "string", "minLength": 1, "maxLength": 200 },
+        "shelfId": { "type": "string", "maxLength": 128 },
+        "shelfCode": { "type": "string", "maxLength": 64 },
+        "conductedByUid": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "conductedByName": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "startedAt": { "type": "string", "maxLength": 64 },
+        "completedAt": { "type": "string", "maxLength": 64 },
+        "status": { "type": "string", "enum": ["Berlangsung", "Selesai"] },
+        "totalExpected": { "type": "number" },
+        "totalScanned": { "type": "number" },
+        "totalDiscrepancy": { "type": "number" },
+        "notes": { "type": "string", "maxLength": 500 },
+        "items": { "type": "array" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": [
+        "numericId",
+        "auditNumber",
+        "title",
+        "conductedByUid",
+        "startedAt",
+        "status",
+        "totalExpected",
+        "totalScanned",
+        "totalDiscrepancy",
+        "items",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "Notification": {
+      "title": "Notification",
+      "description": "Notifikasi jatuh tempo, keterlambatan, reservasi, dan persetujuan.",
+      "type": "object",
+      "properties": {
+        "numericId": { "type": "number" },
+        "targetUid": { "type": "string", "maxLength": 128 },
+        "targetRole": { "type": "string", "enum": ["all_staff", "kepala_perpustakaan", "pustakawan", "anggota", "super_admin"] },
+        "memberId": { "type": "string", "maxLength": 128 },
+        "type": { "type": "string", "enum": ["info", "warning", "danger", "success"] },
+        "title": { "type": "string", "minLength": 1, "maxLength": 160 },
+        "message": { "type": "string", "minLength": 1, "maxLength": 500 },
+        "link": { "type": "string", "maxLength": 200 },
+        "isRead": { "type": "boolean" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": [
+        "numericId",
+        "targetRole",
+        "type",
+        "title",
+        "message",
+        "isRead",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "LibrarySetting": {
+      "title": "LibrarySetting",
+      "description": "Konfigurasi identitas sekolah, aturan sirkulasi global, dan matriks RBAC.",
+      "type": "object",
+      "properties": {
+        "kind": { "type": "string", "enum": ["global", "rbac"] },
+        "values": { "type": "object" },
+        "rolePermissions": { "type": "object" },
+        "customRoles": { "type": "object" },
+        "seeded": { "type": "boolean" },
+        "updatedByUid": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["kind", "updatedByUid", "updatedAt"]
+    },
+    "AuditLog": {
+      "title": "AuditLog",
+      "description": "Jejak audit aktivitas mutasi sistem (append-only).",
+      "type": "object",
+      "properties": {
+        "userUid": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "userName": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "action": { "type": "string", "minLength": 1, "maxLength": 80 },
+        "entityType": { "type": "string", "minLength": 1, "maxLength": 64 },
+        "entityId": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "summary": { "type": "string", "maxLength": 500 },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["userUid", "userName", "action", "entityType", "entityId", "createdAt"]
+    },
+    "ReadingSchedule": {
+      "title": "ReadingSchedule",
+      "description": "Jadwal kegiatan membaca buku per kelas SD (1A–6B) beserta riwayat pelaksanaan.",
+      "type": "object",
+      "properties": {
+        "numericId": { "type": "number" },
+        "scheduleCode": { "type": "string", "minLength": 1, "maxLength": 64 },
+        "className": { "type": "string", "minLength": 1, "maxLength": 40 },
+        "gradeLevel": { "type": "number" },
+        "homeroomTeacher": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "companionTeacher": { "type": "string", "maxLength": 120 },
+        "studentCount": { "type": "number" },
+        "dayOfWeek": { "type": "string", "enum": ["Senin", "Selasa", "Rabu", "Kamis", "Jumat", "Sabtu"] },
+        "scheduleDate": { "type": "string", "maxLength": 32 },
+        "startTime": { "type": "string", "minLength": 5, "maxLength": 10 },
+        "endTime": { "type": "string", "minLength": 5, "maxLength": 10 },
+        "roomArea": { "type": "string", "minLength": 1, "maxLength": 100 },
+        "readingMode": { "type": "string", "minLength": 1, "maxLength": 80 },
+        "readingTheme": { "type": "string", "maxLength": 200 },
+        "bookId": { "type": "string", "maxLength": 128 },
+        "bookNumericId": { "type": "number" },
+        "bookTitle": { "type": "string", "maxLength": 240 },
+        "status": { "type": "string", "enum": ["Terjadwal", "Berlangsung", "Selesai", "Ditunda", "Dibatalkan"] },
+        "studentsPresent": { "type": "number" },
+        "booksReadCount": { "type": "number" },
+        "sessionNotes": { "type": "string", "maxLength": 500 },
+        "completedAt": { "type": "string", "maxLength": 64 },
+        "sessionLogs": { "type": "array" },
+        "archived": { "type": "boolean" },
+        "createdByUid": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": [
+        "numericId",
+        "scheduleCode",
+        "className",
+        "gradeLevel",
+        "homeroomTeacher",
+        "studentCount",
+        "dayOfWeek",
+        "startTime",
+        "endTime",
+        "roomArea",
+        "readingMode",
+        "status",
+        "studentsPresent",
+        "booksReadCount",
+        "sessionLogs",
+        "archived",
+        "createdByUid",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "SchoolClass": {
+      "title": "SchoolClass",
+      "description": "Data kelas SD (1A–6B) berisi wali kelas, guru pendamping, dan daftar siswa aktif/arsip untuk absensi sesi baca.",
+      "type": "object",
+      "properties": {
+        "className": { "type": "string", "minLength": 1, "maxLength": 40 },
+        "gradeLevel": { "type": "number" },
+        "homeroomTeacher": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "companionTeacher": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "students": { "type": "array" },
+        "updatedByUid": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": [
+        "className",
+        "gradeLevel",
+        "homeroomTeacher",
+        "companionTeacher",
+        "students",
+        "updatedByUid",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "BackupSnapshot": {
+      "title": "BackupSnapshot",
+      "description": "Riwayat snapshot cadangan terverifikasi SHA-256 yang dikelola khusus oleh Super Admin.",
+      "type": "object",
+      "properties": {
+        "numericId": { "type": "number" },
+        "snapshotCode": { "type": "string", "minLength": 1, "maxLength": 64 },
+        "label": { "type": "string", "minLength": 1, "maxLength": 160 },
+        "notes": { "type": "string", "maxLength": 300 },
+        "mode": { "type": "string", "enum": ["full", "partial"] },
+        "modules": { "type": "array" },
+        "checksum": { "type": "string", "minLength": 64, "maxLength": 64 },
+        "totalRecords": { "type": "number" },
+        "sizeBytes": { "type": "number" },
+        "tableCounts": { "type": "object" },
+        "tables": { "type": "object" },
+        "isAutoSafety": { "type": "boolean" },
+        "createdByUid": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "createdByName": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": [
+        "numericId",
+        "snapshotCode",
+        "label",
+        "mode",
+        "modules",
+        "checksum",
+        "totalRecords",
+        "sizeBytes",
+        "tableCounts",
+        "isAutoSafety",
+        "createdByUid",
+        "createdByName",
+        "createdAt"
+      ]
+    }
+  },
+  "firestore": {
+    "/test/{docId}": {
+      "schema": { "$ref": "#/entities/TestConnection" },
+      "description": "Koleksi khusus pemeriksaan koneksi startup Firestore."
+    },
+    "/staff_roles/{uid}": {
+      "schema": { "$ref": "#/entities/StaffRole" },
+      "description": "Dokumen penetapan peran staf perpustakaan."
+    },
+    "/users/{uid}": {
+      "schema": { "$ref": "#/entities/UserProfile" },
+      "description": "Profil pengguna Google terautentikasi."
+    },
+    "/public_catalog/{bookId}": {
+      "schema": { "$ref": "#/entities/PublicCatalogItem" },
+      "description": "Katalog OPAC publik bebas PII."
+    },
+    "/books/{bookId}": {
+      "schema": { "$ref": "#/entities/Book" },
+      "description": "Data bibliografi induk koleksi buku SD."
+    },
+    "/book_copies/{copyId}": {
+      "schema": { "$ref": "#/entities/BookCopy" },
+      "description": "Inventaris fisik setiap eksemplar buku."
+    },
+    "/members/{memberId}": {
+      "schema": { "$ref": "#/entities/Member" },
+      "description": "Data anggota siswa, guru, staf, dan komite."
+    },
+    "/membership_types/{typeId}": {
+      "schema": { "$ref": "#/entities/MembershipType" },
+      "description": "Jenis keanggotaan dan kebijakan pinjaman."
+    },
+    "/categories/{categoryId}": {
+      "schema": { "$ref": "#/entities/Category" },
+      "description": "Kategori subjek koleksi buku SD."
+    },
+    "/locations/{locationId}": {
+      "schema": { "$ref": "#/entities/Location" },
+      "description": "Ruangan dan area perpustakaan."
+    },
+    "/shelves/{shelfId}": {
+      "schema": { "$ref": "#/entities/Shelf" },
+      "description": "Rak penyimpanan buku."
+    },
+    "/loans/{loanId}": {
+      "schema": { "$ref": "#/entities/Loan" },
+      "description": "Transaksi peminjaman buku."
+    },
+    "/returns/{returnId}": {
+      "schema": { "$ref": "#/entities/ReturnRecord" },
+      "description": "Catatan pengembalian dan denda."
+    },
+    "/reservations/{reservationId}": {
+      "schema": { "$ref": "#/entities/Reservation" },
+      "description": "Antrean reservasi buku."
+    },
+    "/fines/{fineId}": {
+      "schema": { "$ref": "#/entities/Fine" },
+      "description": "Tagihan denda perpustakaan."
+    },
+    "/payments/{paymentId}": {
+      "schema": { "$ref": "#/entities/Payment" },
+      "description": "Riwayat pembayaran denda."
+    },
+    "/suppliers/{supplierId}": {
+      "schema": { "$ref": "#/entities/Supplier" },
+      "description": "Pemasok buku perpustakaan."
+    },
+    "/acquisitions/{acquisitionId}": {
+      "schema": { "$ref": "#/entities/Acquisition" },
+      "description": "Usulan dan penerimaan pengadaan buku."
+    },
+    "/inventory_audits/{auditId}": {
+      "schema": { "$ref": "#/entities/InventoryAudit" },
+      "description": "Sesi stock opname koleksi."
+    },
+    "/notifications/{notificationId}": {
+      "schema": { "$ref": "#/entities/Notification" },
+      "description": "Notifikasi operasional perpustakaan."
+    },
+    "/library_settings/{settingId}": {
+      "schema": { "$ref": "#/entities/LibrarySetting" },
+      "description": "Pengaturan global sekolah dan izin RBAC."
+    },
+    "/audit_logs/{logId}": {
+      "schema": { "$ref": "#/entities/AuditLog" },
+      "description": "Jejak audit permanen mutasi sistem."
+    },
+    "/reading_schedules/{scheduleId}": {
+      "schema": { "$ref": "#/entities/ReadingSchedule" },
+      "description": "Jadwal baca buku setiap kelas SD (1A–6B) dan log pelaksanaan sesi."
+    },
+    "/school_classes/{classId}": {
+      "schema": { "$ref": "#/entities/SchoolClass" },
+      "description": "Daftar kelas SD (1A–6B), wali kelas, guru pendamping, dan daftar siswa per kelas."
+    },
+    "/backup_snapshots/{snapshotId}": {
+      "schema": { "$ref": "#/entities/BackupSnapshot" },
+      "description": "Arsip snapshot cadangan terverifikasi SHA-256 milik Super Admin."
+    }
+  }
+}

@@ -1,0 +1,6 @@
+{
+  "name": "Lentera Pustaka",
+  "description": "Sistem Manajemen Perpustakaan Terpadu untuk pengelolaan koleksi, sirkulasi, reservasi, denda, inventaris, pengadaan, dan analitik.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

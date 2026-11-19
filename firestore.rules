@@ -1,0 +1,1177 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Pillar 4.1: Global default-deny safety net
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // --- Global Hardened Primitives ---
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isVerifiedUser() {
+      return isSignedIn() && request.auth.token.email_verified == true;
+    }
+
+    function isOwner(uid) {
+      return isVerifiedUser() && request.auth.uid == uid;
+    }
+
+    function hasStaffDoc() {
+      return isVerifiedUser()
+        && exists(/databases/$(database)/documents/staff_roles/$(request.auth.uid));
+    }
+
+    function staffRole() {
+      return get(/databases/$(database)/documents/staff_roles/$(request.auth.uid)).data;
+    }
+
+    function isAdmin() {
+      return isVerifiedUser() && (
+        request.auth.token.email == 'nobuhikokagamihara@gmail.com'
+        || (hasStaffDoc() && staffRole().isActive == true && staffRole().role == 'super_admin')
+      );
+    }
+
+    function isKepala() {
+      return isAdmin() || (hasStaffDoc() && staffRole().isActive == true && staffRole().role == 'kepala_perpustakaan');
+    }
+
+    function isStaff() {
+      return isAdmin() || (
+        hasStaffDoc()
+        && staffRole().isActive == true
+        && staffRole().role in ['super_admin', 'kepala_perpustakaan', 'pustakawan']
+      );
+    }
+
+    function isNonEmptyString(val, maxLen) {
+      return val is string && val.size() >= 1 && val.size() <= maxLen;
+    }
+
+    function isOptionalString(val, maxLen) {
+      return val is string && val.size() <= maxLen;
+    }
+
+    // --- Entity Validation Blueprints (Pillar 2: Anti-Update-Gap) ---
+
+    function isValidStaffRole(data) {
+      return data.keys().hasAll(['uid', 'email', 'fullName', 'role', 'isActive', 'assignedByUid', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly(['uid', 'email', 'fullName', 'role', 'isActive', 'assignedByUid', 'createdAt', 'updatedAt'])
+        && isValidId(data.uid)
+        && isNonEmptyString(data.email, 160)
+        && isNonEmptyString(data.fullName, 120)
+        && data.role in ['super_admin', 'kepala_perpustakaan', 'pustakawan', 'anggota']
+        && data.isActive is bool
+        && isValidId(data.assignedByUid)
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidUserProfile(data) {
+      return data.keys().hasAll(['uid', 'email', 'fullName', 'role', 'isActive', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly(['uid', 'email', 'fullName', 'role', 'memberId', 'memberCode', 'isActive', 'createdAt', 'updatedAt'])
+        && isValidId(data.uid)
+        && isNonEmptyString(data.email, 160)
+        && isNonEmptyString(data.fullName, 120)
+        && data.role in ['super_admin', 'kepala_perpustakaan', 'pustakawan', 'anggota']
+        && (!('memberId' in data) || isOptionalString(data.memberId, 128))
+        && (!('memberCode' in data) || isOptionalString(data.memberCode, 64))
+        && data.isActive is bool
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidPublicCatalog(data) {
+      return data.keys().hasAll(['numericId', 'title', 'publishYear', 'isReferenceOnly', 'readInPlaceOnly', 'totalCopies', 'availableCopies', 'borrowCount', 'archived', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly([
+          'numericId', 'title', 'subtitle', 'seriesName', 'volume', 'isbn', 'edition', 'publishYear',
+          'publishCity', 'language', 'description', 'tableOfContents', 'pages', 'dimensions', 'bindingType',
+          'illustrationNotes', 'coverUrl', 'categoryId', 'categoryName', 'publisherName', 'authors',
+          'illustrator', 'editor', 'translator', 'subcategory', 'ddcCode', 'callNumber', 'subjects',
+          'targetGrade', 'ageRange', 'isReferenceOnly', 'readInPlaceOnly', 'isFeatured', 'totalCopies',
+          'availableCopies', 'shelfLocations', 'borrowCount', 'archived', 'createdAt', 'updatedAt'
+        ])
+        && data.numericId is number && data.numericId >= 1
+        && isNonEmptyString(data.title, 240)
+        && (!('subtitle' in data) || isOptionalString(data.subtitle, 240))
+        && (!('seriesName' in data) || isOptionalString(data.seriesName, 160))
+        && (!('volume' in data) || isOptionalString(data.volume, 60))
+        && (!('isbn' in data) || isOptionalString(data.isbn, 40))
+        && (!('edition' in data) || isOptionalString(data.edition, 80))
+        && data.publishYear is number && data.publishYear >= 1900 && data.publishYear <= 2100
+        && (!('publishCity' in data) || isOptionalString(data.publishCity, 100))
+        && (!('language' in data) || isOptionalString(data.language, 60))
+        && (!('description' in data) || isOptionalString(data.description, 2000))
+        && (!('tableOfContents' in data) || isOptionalString(data.tableOfContents, 2000))
+        && (!('pages' in data) || (data.pages is number && data.pages >= 0))
+        && (!('dimensions' in data) || isOptionalString(data.dimensions, 80))
+        && (!('bindingType' in data) || isOptionalString(data.bindingType, 80))
+        && (!('illustrationNotes' in data) || isOptionalString(data.illustrationNotes, 160))
+        && (!('coverUrl' in data) || isOptionalString(data.coverUrl, 1000))
+        && (!('categoryId' in data) || isOptionalString(data.categoryId, 128))
+        && (!('categoryName' in data) || isOptionalString(data.categoryName, 120))
+        && (!('publisherName' in data) || isOptionalString(data.publisherName, 120))
+        && (!('authors' in data) || isOptionalString(data.authors, 200))
+        && (!('illustrator' in data) || isOptionalString(data.illustrator, 160))
+        && (!('editor' in data) || isOptionalString(data.editor, 160))
+        && (!('translator' in data) || isOptionalString(data.translator, 160))
+        && (!('subcategory' in data) || isOptionalString(data.subcategory, 120))
+        && (!('ddcCode' in data) || isOptionalString(data.ddcCode, 40))
+        && (!('callNumber' in data) || isOptionalString(data.callNumber, 60))
+        && (!('subjects' in data) || isOptionalString(data.subjects, 300))
+        && (!('targetGrade' in data) || isOptionalString(data.targetGrade, 80))
+        && (!('ageRange' in data) || isOptionalString(data.ageRange, 60))
+        && data.isReferenceOnly is bool
+        && data.readInPlaceOnly is bool
+        && (!('isFeatured' in data) || data.isFeatured is bool)
+        && data.totalCopies is number && data.totalCopies >= 0
+        && data.availableCopies is number && data.availableCopies >= 0
+        && (!('shelfLocations' in data) || isOptionalString(data.shelfLocations, 240))
+        && data.borrowCount is number && data.borrowCount >= 0
+        && data.archived is bool
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidBook(data) {
+      return data.keys().hasAll(['numericId', 'title', 'publishYear', 'price', 'isReferenceOnly', 'readInPlaceOnly', 'archived', 'createdByUid', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly([
+          'numericId', 'title', 'subtitle', 'seriesName', 'volume', 'isbn', 'edition', 'publishYear',
+          'publishCity', 'language', 'description', 'tableOfContents', 'pages', 'dimensions', 'bindingType',
+          'paperType', 'weightGrams', 'illustrationNotes', 'coverUrl', 'price', 'categoryId', 'categoryName',
+          'publisherName', 'authors', 'illustrator', 'editor', 'translator', 'subcategory', 'ddcCode',
+          'callNumber', 'subjects', 'targetGrade', 'ageRange', 'acquisitionSource', 'isReferenceOnly',
+          'readInPlaceOnly', 'isFeatured', 'acquisitionDate', 'borrowCount', 'archived', 'createdByUid',
+          'createdAt', 'updatedAt'
+        ])
+        && data.numericId is number && data.numericId >= 1
+        && isNonEmptyString(data.title, 240)
+        && (!('subtitle' in data) || isOptionalString(data.subtitle, 240))
+        && (!('seriesName' in data) || isOptionalString(data.seriesName, 160))
+        && (!('volume' in data) || isOptionalString(data.volume, 60))
+        && (!('isbn' in data) || isOptionalString(data.isbn, 40))
+        && (!('edition' in data) || isOptionalString(data.edition, 80))
+        && data.publishYear is number && data.publishYear >= 1900 && data.publishYear <= 2100
+        && (!('publishCity' in data) || isOptionalString(data.publishCity, 100))
+        && (!('language' in data) || isOptionalString(data.language, 60))
+        && (!('description' in data) || isOptionalString(data.description, 2000))
+        && (!('tableOfContents' in data) || isOptionalString(data.tableOfContents, 2000))
+        && (!('pages' in data) || (data.pages is number && data.pages >= 0))
+        && (!('dimensions' in data) || isOptionalString(data.dimensions, 80))
+        && (!('bindingType' in data) || isOptionalString(data.bindingType, 80))
+        && (!('paperType' in data) || isOptionalString(data.paperType, 80))
+        && (!('weightGrams' in data) || (data.weightGrams is number && data.weightGrams >= 0 && data.weightGrams <= 20000))
+        && (!('illustrationNotes' in data) || isOptionalString(data.illustrationNotes, 160))
+        && (!('coverUrl' in data) || isOptionalString(data.coverUrl, 1000))
+        && data.price is number && data.price >= 0
+        && (!('categoryId' in data) || isOptionalString(data.categoryId, 128))
+        && (!('categoryName' in data) || isOptionalString(data.categoryName, 120))
+        && (!('publisherName' in data) || isOptionalString(data.publisherName, 120))
+        && (!('authors' in data) || isOptionalString(data.authors, 200))
+        && (!('illustrator' in data) || isOptionalString(data.illustrator, 160))
+        && (!('editor' in data) || isOptionalString(data.editor, 160))
+        && (!('translator' in data) || isOptionalString(data.translator, 160))
+        && (!('subcategory' in data) || isOptionalString(data.subcategory, 120))
+        && (!('ddcCode' in data) || isOptionalString(data.ddcCode, 40))
+        && (!('callNumber' in data) || isOptionalString(data.callNumber, 60))
+        && (!('subjects' in data) || isOptionalString(data.subjects, 300))
+        && (!('targetGrade' in data) || isOptionalString(data.targetGrade, 80))
+        && (!('ageRange' in data) || isOptionalString(data.ageRange, 60))
+        && (!('acquisitionSource' in data) || isOptionalString(data.acquisitionSource, 120))
+        && data.isReferenceOnly is bool
+        && data.readInPlaceOnly is bool
+        && (!('isFeatured' in data) || data.isFeatured is bool)
+        && (!('acquisitionDate' in data) || isOptionalString(data.acquisitionDate, 32))
+        && (!('borrowCount' in data) || (data.borrowCount is number && data.borrowCount >= 0))
+        && data.archived is bool
+        && isValidId(data.createdByUid)
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidBookCopy(data) {
+      return data.keys().hasAll(['numericId', 'bookId', 'bookTitle', 'inventoryCode', 'barcode', 'condition', 'status', 'price', 'archived', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly([
+          'numericId', 'bookId', 'bookTitle', 'inventoryCode', 'barcode', 'shelfId', 'shelfCode',
+          'shelfName', 'condition', 'status', 'acquisitionDate', 'price', 'notes', 'archived',
+          'createdAt', 'updatedAt'
+        ])
+        && data.numericId is number && data.numericId >= 1
+        && isValidId(data.bookId)
+        && isNonEmptyString(data.bookTitle, 240)
+        && isNonEmptyString(data.inventoryCode, 64)
+        && isNonEmptyString(data.barcode, 64)
+        && (!('shelfId' in data) || isOptionalString(data.shelfId, 128))
+        && (!('shelfCode' in data) || isOptionalString(data.shelfCode, 64))
+        && (!('shelfName' in data) || isOptionalString(data.shelfName, 120))
+        && data.condition in ['Baik', 'Rusak Ringan', 'Rusak Berat', 'Hilang']
+        && data.status in ['Tersedia', 'Dipinjam', 'Direservasi', 'Perbaikan', 'Hilang', 'Dihapus']
+        && (!('acquisitionDate' in data) || isOptionalString(data.acquisitionDate, 32))
+        && data.price is number && data.price >= 0
+        && (!('notes' in data) || isOptionalString(data.notes, 500))
+        && data.archived is bool
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidMember(data) {
+      return data.keys().hasAll(['numericId', 'memberCode', 'fullName', 'membershipTypeId', 'membershipTypeName', 'registeredAt', 'expiresAt', 'status', 'archived', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly([
+          'numericId', 'memberCode', 'fullName', 'membershipTypeId', 'membershipTypeName',
+          'identityNumber', 'gender', 'unitOrClass', 'address', 'phone', 'email',
+          'registeredAt', 'expiresAt', 'status', 'blockReason', 'ownerUid', 'archived',
+          'createdAt', 'updatedAt'
+        ])
+        && data.numericId is number && data.numericId >= 1
+        && isNonEmptyString(data.memberCode, 64)
+        && isNonEmptyString(data.fullName, 120)
+        && isValidId(data.membershipTypeId)
+        && isNonEmptyString(data.membershipTypeName, 100)
+        && (!('identityNumber' in data) || isOptionalString(data.identityNumber, 64))
+        && (!('gender' in data) || data.gender in ['Laki-laki', 'Perempuan', 'Tidak Disebutkan'])
+        && (!('unitOrClass' in data) || isOptionalString(data.unitOrClass, 100))
+        && (!('address' in data) || isOptionalString(data.address, 300))
+        && (!('phone' in data) || isOptionalString(data.phone, 40))
+        && (!('email' in data) || isOptionalString(data.email, 160))
+        && isNonEmptyString(data.registeredAt, 32)
+        && isNonEmptyString(data.expiresAt, 32)
+        && data.status in ['Aktif', 'Nonaktif', 'Diblokir']
+        && (!('blockReason' in data) || isOptionalString(data.blockReason, 300))
+        && (!('ownerUid' in data) || isOptionalString(data.ownerUid, 128))
+        && data.archived is bool
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidMembershipType(data) {
+      return data.keys().hasAll(['numericId', 'code', 'name', 'maxLoans', 'loanDurationDays', 'maxRenewals', 'dailyFineRate', 'maxFineCap', 'allowReservation', 'updatedAt'])
+        && data.keys().hasOnly(['numericId', 'code', 'name', 'maxLoans', 'loanDurationDays', 'maxRenewals', 'dailyFineRate', 'maxFineCap', 'allowReservation', 'updatedAt'])
+        && data.numericId is number && data.numericId >= 1
+        && isNonEmptyString(data.code, 40)
+        && isNonEmptyString(data.name, 100)
+        && data.maxLoans is number && data.maxLoans >= 1 && data.maxLoans <= 30
+        && data.loanDurationDays is number && data.loanDurationDays >= 1 && data.loanDurationDays <= 90
+        && data.maxRenewals is number && data.maxRenewals >= 0 && data.maxRenewals <= 10
+        && data.dailyFineRate is number && data.dailyFineRate >= 0
+        && data.maxFineCap is number && data.maxFineCap >= 0
+        && data.allowReservation is bool
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidCategory(data) {
+      return data.keys().hasAll(['numericId', 'code', 'name', 'createdAt'])
+        && data.keys().hasOnly(['numericId', 'code', 'name', 'createdAt'])
+        && data.numericId is number && data.numericId >= 1
+        && isNonEmptyString(data.code, 32)
+        && isNonEmptyString(data.name, 120)
+        && data.createdAt is timestamp;
+    }
+
+    function isValidLocation(data) {
+      return data.keys().hasAll(['numericId', 'code', 'building', 'room', 'createdAt'])
+        && data.keys().hasOnly(['numericId', 'code', 'building', 'floor', 'room', 'description', 'createdAt'])
+        && data.numericId is number && data.numericId >= 1
+        && isNonEmptyString(data.code, 32)
+        && isNonEmptyString(data.building, 120)
+        && (!('floor' in data) || isOptionalString(data.floor, 40))
+        && isNonEmptyString(data.room, 120)
+        && (!('description' in data) || isOptionalString(data.description, 300))
+        && data.createdAt is timestamp;
+    }
+
+    function isValidShelf(data) {
+      return data.keys().hasAll(['numericId', 'locationId', 'code', 'name', 'capacity', 'createdAt'])
+        && data.keys().hasOnly(['numericId', 'locationId', 'code', 'name', 'capacity', 'building', 'room', 'createdAt'])
+        && data.numericId is number && data.numericId >= 1
+        && isValidId(data.locationId)
+        && isNonEmptyString(data.code, 32)
+        && isNonEmptyString(data.name, 120)
+        && data.capacity is number && data.capacity >= 1 && data.capacity <= 5000
+        && (!('building' in data) || isOptionalString(data.building, 120))
+        && (!('room' in data) || isOptionalString(data.room, 120))
+        && data.createdAt is timestamp;
+    }
+
+    function isValidLoan(data) {
+      return data.keys().hasAll(['numericId', 'loanNumber', 'idempotencyKey', 'memberId', 'memberCode', 'memberName', 'staffUid', 'loanDate', 'dueDate', 'maxRenewals', 'status', 'items', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly([
+          'numericId', 'loanNumber', 'idempotencyKey', 'memberId', 'memberCode', 'memberName',
+          'ownerUid', 'staffUid', 'staffName', 'loanDate', 'dueDate', 'maxRenewals', 'status',
+          'notes', 'items', 'createdAt', 'updatedAt'
+        ])
+        && data.numericId is number && data.numericId >= 1
+        && isNonEmptyString(data.loanNumber, 64)
+        && isNonEmptyString(data.idempotencyKey, 128)
+        && isValidId(data.memberId)
+        && isNonEmptyString(data.memberCode, 64)
+        && isNonEmptyString(data.memberName, 120)
+        && (!('ownerUid' in data) || isOptionalString(data.ownerUid, 128))
+        && isValidId(data.staffUid)
+        && (!('staffName' in data) || isOptionalString(data.staffName, 120))
+        && isNonEmptyString(data.loanDate, 32)
+        && isNonEmptyString(data.dueDate, 32)
+        && data.maxRenewals is number && data.maxRenewals >= 0 && data.maxRenewals <= 10
+        && data.status in ['Aktif', 'Terlambat', 'Sebagian Kembali', 'Selesai']
+        && (!('notes' in data) || isOptionalString(data.notes, 500))
+        && data.items is list && data.items.size() >= 1 && data.items.size() <= 20 && data.items[0] is map
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidReturnRecord(data) {
+      return data.keys().hasAll(['numericId', 'returnNumber', 'loanId', 'loanNumber', 'copyId', 'inventoryCode', 'bookTitle', 'memberId', 'memberName', 'staffUid', 'returnedAt', 'condition', 'status', 'overdueDays', 'fineAmount', 'createdAt'])
+        && data.keys().hasOnly([
+          'numericId', 'returnNumber', 'loanId', 'loanNumber', 'copyId', 'inventoryCode', 'bookTitle',
+          'memberId', 'memberName', 'ownerUid', 'staffUid', 'returnedAt', 'condition', 'status',
+          'overdueDays', 'fineAmount', 'notes', 'createdAt'
+        ])
+        && data.numericId is number && data.numericId >= 1
+        && isNonEmptyString(data.returnNumber, 64)
+        && isValidId(data.loanId)
+        && isNonEmptyString(data.loanNumber, 64)
+        && isValidId(data.copyId)
+        && isNonEmptyString(data.inventoryCode, 64)
+        && isNonEmptyString(data.bookTitle, 240)
+        && isValidId(data.memberId)
+        && isNonEmptyString(data.memberName, 120)
+        && (!('ownerUid' in data) || isOptionalString(data.ownerUid, 128))
+        && isValidId(data.staffUid)
+        && isNonEmptyString(data.returnedAt, 32)
+        && data.condition in ['Baik', 'Rusak Ringan', 'Rusak Berat', 'Hilang']
+        && data.status in ['Tepat Waktu', 'Terlambat', 'Rusak', 'Hilang']
+        && data.overdueDays is number && data.overdueDays >= 0
+        && data.fineAmount is number && data.fineAmount >= 0
+        && (!('notes' in data) || isOptionalString(data.notes, 500))
+        && data.createdAt is timestamp;
+    }
+
+    function isValidReservation(data) {
+      return data.keys().hasAll(['numericId', 'reservationNumber', 'bookId', 'bookTitle', 'memberId', 'memberCode', 'memberName', 'queuePosition', 'status', 'reservedAt', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly([
+          'numericId', 'reservationNumber', 'bookId', 'bookTitle', 'isbn', 'copyId', 'inventoryCode',
+          'memberId', 'memberCode', 'memberName', 'ownerUid', 'queuePosition', 'status',
+          'reservedAt', 'expiresAt', 'notes', 'createdAt', 'updatedAt'
+        ])
+        && data.numericId is number && data.numericId >= 1
+        && isNonEmptyString(data.reservationNumber, 64)
+        && isValidId(data.bookId)
+        && isNonEmptyString(data.bookTitle, 240)
+        && (!('isbn' in data) || isOptionalString(data.isbn, 40))
+        && (!('copyId' in data) || isOptionalString(data.copyId, 128))
+        && (!('inventoryCode' in data) || isOptionalString(data.inventoryCode, 64))
+        && isValidId(data.memberId)
+        && isNonEmptyString(data.memberCode, 64)
+        && isNonEmptyString(data.memberName, 120)
+        && (!('ownerUid' in data) || isOptionalString(data.ownerUid, 128))
+        && data.queuePosition is number && data.queuePosition >= 1
+        && data.status in ['Menunggu', 'Tersedia', 'Diambil', 'Dibatalkan', 'Kedaluwarsa']
+        && isNonEmptyString(data.reservedAt, 64)
+        && (!('expiresAt' in data) || isOptionalString(data.expiresAt, 64))
+        && (!('notes' in data) || isOptionalString(data.notes, 400))
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidFine(data) {
+      return data.keys().hasAll(['numericId', 'fineNumber', 'memberId', 'memberCode', 'memberName', 'fineType', 'amount', 'paidAmount', 'waivedAmount', 'status', 'createdByUid', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly([
+          'numericId', 'fineNumber', 'memberId', 'memberCode', 'memberName', 'ownerUid',
+          'loanId', 'loanNumber', 'returnId', 'fineType', 'amount', 'paidAmount', 'waivedAmount',
+          'status', 'reason', 'createdByUid', 'createdAt', 'updatedAt'
+        ])
+        && data.numericId is number && data.numericId >= 1
+        && isNonEmptyString(data.fineNumber, 64)
+        && isValidId(data.memberId)
+        && isNonEmptyString(data.memberCode, 64)
+        && isNonEmptyString(data.memberName, 120)
+        && (!('ownerUid' in data) || isOptionalString(data.ownerUid, 128))
+        && (!('loanId' in data) || isOptionalString(data.loanId, 128))
+        && (!('loanNumber' in data) || isOptionalString(data.loanNumber, 64))
+        && (!('returnId' in data) || isOptionalString(data.returnId, 128))
+        && data.fineType in ['Keterlambatan', 'Kerusakan', 'Kehilangan']
+        && data.amount is number && data.amount >= 0
+        && data.paidAmount is number && data.paidAmount >= 0
+        && data.waivedAmount is number && data.waivedAmount >= 0
+        && data.status in ['Belum Lunas', 'Sebagian', 'Lunas', 'Dibebaskan']
+        && (!('reason' in data) || isOptionalString(data.reason, 400))
+        && isValidId(data.createdByUid)
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidPayment(data) {
+      return data.keys().hasAll(['numericId', 'paymentNumber', 'fineId', 'fineNumber', 'memberId', 'memberCode', 'memberName', 'amount', 'method', 'receivedByUid', 'receivedByName', 'paidAt', 'createdAt'])
+        && data.keys().hasOnly([
+          'numericId', 'paymentNumber', 'fineId', 'fineNumber', 'memberId', 'memberCode', 'memberName',
+          'ownerUid', 'amount', 'method', 'receivedByUid', 'receivedByName', 'paidAt', 'notes', 'createdAt'
+        ])
+        && data.numericId is number && data.numericId >= 1
+        && isNonEmptyString(data.paymentNumber, 64)
+        && isValidId(data.fineId)
+        && isNonEmptyString(data.fineNumber, 64)
+        && isValidId(data.memberId)
+        && isNonEmptyString(data.memberCode, 64)
+        && isNonEmptyString(data.memberName, 120)
+        && (!('ownerUid' in data) || isOptionalString(data.ownerUid, 128))
+        && data.amount is number && data.amount > 0
+        && data.method in ['Tunai', 'QRIS', 'Transfer']
+        && isValidId(data.receivedByUid)
+        && isNonEmptyString(data.receivedByName, 120)
+        && isNonEmptyString(data.paidAt, 64)
+        && (!('notes' in data) || isOptionalString(data.notes, 400))
+        && data.createdAt is timestamp;
+    }
+
+    function isValidSupplier(data) {
+      return data.keys().hasAll(['numericId', 'code', 'name', 'createdAt'])
+        && data.keys().hasOnly(['numericId', 'code', 'name', 'contactPerson', 'phone', 'email', 'address', 'createdAt'])
+        && data.numericId is number && data.numericId >= 1
+        && isNonEmptyString(data.code, 32)
+        && isNonEmptyString(data.name, 140)
+        && (!('contactPerson' in data) || isOptionalString(data.contactPerson, 120))
+        && (!('phone' in data) || isOptionalString(data.phone, 40))
+        && (!('email' in data) || isOptionalString(data.email, 160))
+        && (!('address' in data) || isOptionalString(data.address, 300))
+        && data.createdAt is timestamp;
+    }
+
+    function isValidAcquisition(data) {
+      return data.keys().hasAll(['numericId', 'requestNumber', 'titleSummary', 'requestedByUid', 'totalEstimatedCost', 'status', 'items', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly([
+          'numericId', 'requestNumber', 'titleSummary', 'supplierId', 'supplierName',
+          'requestedByUid', 'requestedByName', 'approvedByUid', 'approvedByName',
+          'orderDate', 'receivedDate', 'totalEstimatedCost', 'status', 'notes', 'items',
+          'createdAt', 'updatedAt'
+        ])
+        && data.numericId is number && data.numericId >= 1
+        && isNonEmptyString(data.requestNumber, 64)
+        && isNonEmptyString(data.titleSummary, 240)
+        && (!('supplierId' in data) || isOptionalString(data.supplierId, 128))
+        && (!('supplierName' in data) || isOptionalString(data.supplierName, 140))
+        && isValidId(data.requestedByUid)
+        && (!('requestedByName' in data) || isOptionalString(data.requestedByName, 120))
+        && (!('approvedByUid' in data) || isOptionalString(data.approvedByUid, 128))
+        && (!('approvedByName' in data) || isOptionalString(data.approvedByName, 120))
+        && (!('orderDate' in data) || isOptionalString(data.orderDate, 32))
+        && (!('receivedDate' in data) || isOptionalString(data.receivedDate, 32))
+        && data.totalEstimatedCost is number && data.totalEstimatedCost >= 0
+        && data.status in ['Diajukan', 'Menunggu Persetujuan', 'Disetujui', 'Dipesan', 'Diterima Sebagian', 'Selesai', 'Ditolak']
+        && (!('notes' in data) || isOptionalString(data.notes, 500))
+        && data.items is list && data.items.size() >= 1 && data.items.size() <= 30 && data.items[0] is map
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidInventoryAudit(data) {
+      return data.keys().hasAll(['numericId', 'auditNumber', 'title', 'conductedByUid', 'startedAt', 'status', 'totalExpected', 'totalScanned', 'totalDiscrepancy', 'items', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly([
+          'numericId', 'auditNumber', 'title', 'shelfId', 'shelfCode', 'conductedByUid', 'conductedByName',
+          'startedAt', 'completedAt', 'status', 'totalExpected', 'totalScanned', 'totalDiscrepancy',
+          'notes', 'items', 'createdAt', 'updatedAt'
+        ])
+        && data.numericId is number && data.numericId >= 1
+        && isNonEmptyString(data.auditNumber, 64)
+        && isNonEmptyString(data.title, 200)
+        && (!('shelfId' in data) || isOptionalString(data.shelfId, 128))
+        && (!('shelfCode' in data) || isOptionalString(data.shelfCode, 64))
+        && isValidId(data.conductedByUid)
+        && (!('conductedByName' in data) || isOptionalString(data.conductedByName, 120))
+        && isNonEmptyString(data.startedAt, 64)
+        && (!('completedAt' in data) || isOptionalString(data.completedAt, 64))
+        && data.status in ['Berlangsung', 'Selesai']
+        && data.totalExpected is number && data.totalExpected >= 0
+        && data.totalScanned is number && data.totalScanned >= 0
+        && data.totalDiscrepancy is number && data.totalDiscrepancy >= 0
+        && (!('notes' in data) || isOptionalString(data.notes, 500))
+        && data.items is list && data.items.size() <= 500
+        && (data.items.size() == 0 || data.items[0] is map)
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidNotification(data) {
+      return data.keys().hasAll(['numericId', 'targetRole', 'type', 'title', 'message', 'isRead', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly([
+          'numericId', 'targetUid', 'targetRole', 'memberId', 'type', 'title', 'message', 'link',
+          'isRead', 'createdAt', 'updatedAt'
+        ])
+        && data.numericId is number && data.numericId >= 1
+        && (!('targetUid' in data) || isOptionalString(data.targetUid, 128))
+        && data.targetRole in ['all_staff', 'kepala_perpustakaan', 'pustakawan', 'anggota', 'super_admin']
+        && (!('memberId' in data) || isOptionalString(data.memberId, 128))
+        && data.type in ['info', 'warning', 'danger', 'success']
+        && isNonEmptyString(data.title, 160)
+        && isNonEmptyString(data.message, 500)
+        && (!('link' in data) || isOptionalString(data.link, 200))
+        && data.isRead is bool
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidLibrarySetting(data) {
+      return data.keys().hasAll(['kind', 'updatedByUid', 'updatedAt'])
+        && data.keys().hasOnly(['kind', 'values', 'rolePermissions', 'customRoles', 'seeded', 'updatedByUid', 'updatedAt'])
+        && data.kind in ['global', 'rbac']
+        && (!('values' in data) || data.values is map)
+        && (!('rolePermissions' in data) || data.rolePermissions is map)
+        && (!('customRoles' in data) || data.customRoles is map)
+        && (!('seeded' in data) || data.seeded is bool)
+        && isValidId(data.updatedByUid)
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidAuditLog(data) {
+      return data.keys().hasAll(['userUid', 'userName', 'action', 'entityType', 'entityId', 'createdAt'])
+        && data.keys().hasOnly(['userUid', 'userName', 'action', 'entityType', 'entityId', 'summary', 'createdAt'])
+        && isValidId(data.userUid)
+        && isNonEmptyString(data.userName, 120)
+        && isNonEmptyString(data.action, 80)
+        && isNonEmptyString(data.entityType, 64)
+        && isNonEmptyString(data.entityId, 128)
+        && (!('summary' in data) || isOptionalString(data.summary, 500))
+        && data.createdAt is timestamp;
+    }
+
+    function isValidReadingSchedule(data) {
+      return data.keys().hasAll([
+          'numericId', 'scheduleCode', 'className', 'gradeLevel', 'homeroomTeacher', 'studentCount',
+          'dayOfWeek', 'startTime', 'endTime', 'roomArea', 'readingMode', 'status',
+          'studentsPresent', 'booksReadCount', 'sessionLogs', 'archived', 'createdByUid', 'createdAt', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'numericId', 'scheduleCode', 'className', 'gradeLevel', 'homeroomTeacher', 'companionTeacher', 'studentCount',
+          'dayOfWeek', 'scheduleDate', 'startTime', 'endTime', 'roomArea', 'readingMode', 'readingTheme',
+          'bookId', 'bookNumericId', 'bookTitle', 'status', 'studentsPresent', 'booksReadCount',
+          'sessionNotes', 'completedAt', 'sessionLogs', 'archived', 'createdByUid', 'createdAt', 'updatedAt'
+        ])
+        && data.numericId is number && data.numericId >= 1
+        && isNonEmptyString(data.scheduleCode, 64)
+        && isNonEmptyString(data.className, 40)
+        && data.gradeLevel is number && data.gradeLevel >= 1 && data.gradeLevel <= 6
+        && isNonEmptyString(data.homeroomTeacher, 120)
+        && (!('companionTeacher' in data) || isOptionalString(data.companionTeacher, 120))
+        && data.studentCount is number && data.studentCount >= 1 && data.studentCount <= 60
+        && data.dayOfWeek in ['Senin', 'Selasa', 'Rabu', 'Kamis', 'Jumat', 'Sabtu']
+        && (!('scheduleDate' in data) || isOptionalString(data.scheduleDate, 32))
+        && isNonEmptyString(data.startTime, 10)
+        && isNonEmptyString(data.endTime, 10)
+        && isNonEmptyString(data.roomArea, 100)
+        && isNonEmptyString(data.readingMode, 80)
+        && (!('readingTheme' in data) || isOptionalString(data.readingTheme, 200))
+        && (!('bookId' in data) || isOptionalString(data.bookId, 128))
+        && (!('bookNumericId' in data) || (data.bookNumericId is number && data.bookNumericId >= 0))
+        && (!('bookTitle' in data) || isOptionalString(data.bookTitle, 240))
+        && data.status in ['Terjadwal', 'Berlangsung', 'Selesai', 'Ditunda', 'Dibatalkan']
+        && data.studentsPresent is number && data.studentsPresent >= 0 && data.studentsPresent <= 60
+        && data.booksReadCount is number && data.booksReadCount >= 0 && data.booksReadCount <= 500
+        && (!('sessionNotes' in data) || isOptionalString(data.sessionNotes, 500))
+        && (!('completedAt' in data) || isOptionalString(data.completedAt, 64))
+        && data.sessionLogs is list && data.sessionLogs.size() <= 50
+        && (data.sessionLogs.size() == 0 || data.sessionLogs[0] is map)
+        && data.archived is bool
+        && isValidId(data.createdByUid)
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidSchoolClass(data) {
+      return data.keys().hasAll([
+          'className', 'gradeLevel', 'homeroomTeacher', 'companionTeacher', 'students',
+          'updatedByUid', 'createdAt', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'className', 'gradeLevel', 'homeroomTeacher', 'companionTeacher', 'students',
+          'updatedByUid', 'createdAt', 'updatedAt'
+        ])
+        && isNonEmptyString(data.className, 40)
+        && data.gradeLevel is number && data.gradeLevel >= 1 && data.gradeLevel <= 6
+        && isNonEmptyString(data.homeroomTeacher, 120)
+        && isNonEmptyString(data.companionTeacher, 120)
+        && data.students is list && data.students.size() <= 60
+        && (data.students.size() == 0 || data.students[0] is map)
+        && isValidId(data.updatedByUid)
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidBackupSnapshot(data) {
+      return data.keys().hasAll([
+          'numericId', 'snapshotCode', 'label', 'mode', 'modules', 'checksum',
+          'totalRecords', 'sizeBytes', 'tableCounts', 'isAutoSafety',
+          'createdByUid', 'createdByName', 'createdAt'
+        ])
+        && data.keys().hasOnly([
+          'numericId', 'snapshotCode', 'label', 'notes', 'mode', 'modules', 'checksum',
+          'totalRecords', 'sizeBytes', 'tableCounts', 'tables', 'isAutoSafety',
+          'createdByUid', 'createdByName', 'createdAt'
+        ])
+        && data.numericId is number && data.numericId >= 1
+        && isNonEmptyString(data.snapshotCode, 64)
+        && isNonEmptyString(data.label, 160)
+        && (!('notes' in data) || isOptionalString(data.notes, 300))
+        && data.mode in ['full', 'partial']
+        && data.modules is list && data.modules.size() >= 1 && data.modules.size() <= 10
+        && data.modules[0] is string
+        && data.checksum is string && data.checksum.size() == 64
+        && data.totalRecords is number && data.totalRecords >= 0
+        && data.sizeBytes is number && data.sizeBytes >= 0
+        && data.tableCounts is map
+        && (!('tables' in data) || data.tables is map)
+        && data.isAutoSafety is bool
+        && isValidId(data.createdByUid)
+        && isNonEmptyString(data.createdByName, 120)
+        && data.createdAt is timestamp;
+    }
+
+    // --- Collection Rules ---
+
+    // 1. Connection Check Document
+    match /test/{docId} {
+      allow get: if docId == 'connection';
+      allow list, create, update, delete: if false;
+    }
+
+    // 2. Staff Role Registry (Admin-managed)
+    match /staff_roles/{uid} {
+      allow get: if isValidId(uid) && (isOwner(uid) || isAdmin());
+      allow list: if isAdmin();
+      allow create: if isValidId(uid)
+        && isAdmin()
+        && isValidStaffRole(incoming())
+        && incoming().uid == uid
+        && incoming().assignedByUid == request.auth.uid
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time;
+      allow update: if isValidId(uid)
+        && isAdmin()
+        && isValidStaffRole(incoming())
+        && incoming().diff(existing()).affectedKeys().hasOnly(['email', 'fullName', 'role', 'isActive', 'assignedByUid', 'updatedAt'])
+        && incoming().uid == existing().uid
+        && incoming().createdAt == existing().createdAt
+        && incoming().assignedByUid == request.auth.uid
+        && incoming().updatedAt == request.time;
+      allow delete: if isValidId(uid) && isAdmin();
+    }
+
+    // 3. User Profiles (PII Isolated & Role-Locked)
+    match /users/{uid} {
+      allow get: if isValidId(uid) && (isOwner(uid) || isStaff());
+      allow list: if isStaff();
+      allow create: if isValidId(uid)
+        && isOwner(uid)
+        && isValidUserProfile(incoming())
+        && incoming().uid == request.auth.uid
+        && incoming().role == 'anggota'
+        && incoming().isActive == true
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time;
+      allow update: if isVerifiedUser()
+        && isValidId(uid)
+        && isValidUserProfile(incoming())
+        && incoming().uid == existing().uid
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && (
+          (isAdmin() && incoming().diff(existing()).affectedKeys().hasOnly(['fullName', 'email', 'role', 'memberId', 'memberCode', 'isActive', 'updatedAt']))
+          || (isOwner(uid) && incoming().role == existing().role && incoming().isActive == existing().isActive && incoming().diff(existing()).affectedKeys().hasOnly(['fullName', 'memberId', 'memberCode', 'updatedAt']))
+        );
+      allow delete: if false;
+    }
+
+    // 4. Public Catalog OPAC (Zero PII)
+    match /public_catalog/{bookId} {
+      allow get: if isValidId(bookId) && resource.data.archived == false;
+      allow list: if resource.data.archived == false;
+      allow create: if isValidId(bookId)
+        && isStaff()
+        && isValidPublicCatalog(incoming())
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time;
+      allow update: if isValidId(bookId)
+        && isStaff()
+        && isValidPublicCatalog(incoming())
+        && incoming().numericId == existing().numericId
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && (
+          isAdmin()
+          || incoming().diff(existing()).affectedKeys().hasOnly([
+            'title', 'subtitle', 'seriesName', 'volume', 'isbn', 'edition', 'publishYear', 'publishCity',
+            'language', 'description', 'tableOfContents', 'pages', 'dimensions', 'bindingType',
+            'illustrationNotes', 'coverUrl', 'categoryId', 'categoryName', 'publisherName', 'authors',
+            'illustrator', 'editor', 'translator', 'subcategory', 'ddcCode', 'callNumber', 'subjects',
+            'targetGrade', 'ageRange', 'isReferenceOnly', 'readInPlaceOnly', 'isFeatured', 'totalCopies',
+            'availableCopies', 'shelfLocations', 'borrowCount', 'archived', 'updatedAt'
+          ])
+        );
+      allow delete: if false;
+    }
+
+    // 5. Books Master
+    match /books/{bookId} {
+      allow get: if isValidId(bookId) && isStaff();
+      allow list: if isStaff();
+      allow create: if isValidId(bookId)
+        && isStaff()
+        && isValidBook(incoming())
+        && incoming().createdByUid == request.auth.uid
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time;
+      allow update: if isValidId(bookId)
+        && isStaff()
+        && isValidBook(incoming())
+        && incoming().numericId == existing().numericId
+        && incoming().createdByUid == existing().createdByUid
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && (
+          isAdmin()
+          || incoming().diff(existing()).affectedKeys().hasOnly([
+            'title', 'subtitle', 'seriesName', 'volume', 'isbn', 'edition', 'publishYear', 'publishCity',
+            'language', 'description', 'tableOfContents', 'pages', 'dimensions', 'bindingType',
+            'paperType', 'weightGrams', 'illustrationNotes', 'coverUrl', 'price', 'categoryId', 'categoryName',
+            'publisherName', 'authors', 'illustrator', 'editor', 'translator', 'subcategory', 'ddcCode',
+            'callNumber', 'subjects', 'targetGrade', 'ageRange', 'acquisitionSource', 'acquisitionDate',
+            'isReferenceOnly', 'readInPlaceOnly', 'isFeatured', 'borrowCount', 'archived', 'updatedAt'
+          ])
+        );
+      allow delete: if false;
+    }
+
+    // 6. Physical Book Copies
+    match /book_copies/{copyId} {
+      allow get: if isValidId(copyId) && isStaff();
+      allow list: if isStaff();
+      allow create: if isValidId(copyId)
+        && isStaff()
+        && isValidBookCopy(incoming())
+        && existsAfter(/databases/$(database)/documents/books/$(incoming().bookId))
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time;
+      allow update: if isValidId(copyId)
+        && isStaff()
+        && isValidBookCopy(incoming())
+        && incoming().numericId == existing().numericId
+        && incoming().bookId == existing().bookId
+        && incoming().inventoryCode == existing().inventoryCode
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && (
+          isAdmin()
+          || incoming().diff(existing()).affectedKeys().hasOnly(['bookTitle', 'shelfId', 'shelfCode', 'shelfName', 'condition', 'status', 'notes', 'archived', 'updatedAt'])
+        );
+      allow delete: if false;
+    }
+
+    // 7. Members (PII Restricted)
+    match /members/{memberId} {
+      allow get: if isValidId(memberId) && (isStaff() || (isVerifiedUser() && existing().ownerUid == request.auth.uid));
+      allow list: if isStaff() || (isVerifiedUser() && resource.data.ownerUid == request.auth.uid);
+      allow create: if isValidId(memberId)
+        && isVerifiedUser()
+        && isValidMember(incoming())
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time
+        && (
+          isStaff()
+          || (incoming().ownerUid == request.auth.uid && incoming().status == 'Aktif' && incoming().archived == false)
+        );
+      allow update: if isValidId(memberId)
+        && isStaff()
+        && isValidMember(incoming())
+        && incoming().numericId == existing().numericId
+        && incoming().memberCode == existing().memberCode
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && (
+          isAdmin()
+          || incoming().diff(existing()).affectedKeys().hasOnly([
+            'fullName', 'membershipTypeId', 'membershipTypeName', 'identityNumber', 'gender',
+            'unitOrClass', 'address', 'phone', 'email', 'expiresAt', 'status', 'blockReason',
+            'ownerUid', 'archived', 'updatedAt'
+          ])
+        );
+      allow delete: if false;
+    }
+
+    // 8. Membership Types
+    match /membership_types/{typeId} {
+      allow get: if isValidId(typeId) && isVerifiedUser();
+      allow list: if isVerifiedUser();
+      allow create: if isValidId(typeId)
+        && isStaff()
+        && isValidMembershipType(incoming())
+        && incoming().updatedAt == request.time;
+      allow update: if isValidId(typeId)
+        && isAdmin()
+        && isValidMembershipType(incoming())
+        && incoming().diff(existing()).affectedKeys().hasOnly(['name', 'maxLoans', 'loanDurationDays', 'maxRenewals', 'dailyFineRate', 'maxFineCap', 'allowReservation', 'updatedAt'])
+        && incoming().updatedAt == request.time;
+      allow delete: if false;
+    }
+
+    // 9. Categories (Public OPAC taxonomy)
+    match /categories/{categoryId} {
+      allow get: if isValidId(categoryId);
+      allow list: if resource.data.numericId >= 1;
+      allow create: if isValidId(categoryId)
+        && isStaff()
+        && isValidCategory(incoming())
+        && incoming().createdAt == request.time;
+      allow update: if isValidId(categoryId)
+        && isStaff()
+        && isValidCategory(incoming())
+        && incoming().diff(existing()).affectedKeys().hasOnly(['code', 'name'])
+        && incoming().createdAt == existing().createdAt;
+      allow delete: if false;
+    }
+
+    // 10. Locations
+    match /locations/{locationId} {
+      allow get: if isValidId(locationId) && isStaff();
+      allow list: if isStaff();
+      allow create: if isValidId(locationId)
+        && isStaff()
+        && isValidLocation(incoming())
+        && incoming().createdAt == request.time;
+      allow update: if isValidId(locationId)
+        && isStaff()
+        && isValidLocation(incoming())
+        && incoming().diff(existing()).affectedKeys().hasOnly(['building', 'floor', 'room', 'description'])
+        && incoming().createdAt == existing().createdAt;
+      allow delete: if false;
+    }
+
+    // 11. Shelves
+    match /shelves/{shelfId} {
+      allow get: if isValidId(shelfId) && isStaff();
+      allow list: if isStaff();
+      allow create: if isValidId(shelfId)
+        && isStaff()
+        && isValidShelf(incoming())
+        && existsAfter(/databases/$(database)/documents/locations/$(incoming().locationId))
+        && incoming().createdAt == request.time;
+      allow update: if isValidId(shelfId)
+        && isStaff()
+        && isValidShelf(incoming())
+        && incoming().diff(existing()).affectedKeys().hasOnly(['name', 'capacity', 'building', 'room'])
+        && incoming().createdAt == existing().createdAt;
+      allow delete: if false;
+    }
+
+    // 12. Loans (Circulation & Terminal Lock on 'Selesai')
+    match /loans/{loanId} {
+      allow get: if isValidId(loanId) && (isStaff() || (isVerifiedUser() && existing().ownerUid == request.auth.uid));
+      allow list: if isStaff() || (isVerifiedUser() && resource.data.ownerUid == request.auth.uid);
+      allow create: if isValidId(loanId)
+        && isStaff()
+        && isValidLoan(incoming())
+        && existsAfter(/databases/$(database)/documents/members/$(incoming().memberId))
+        && incoming().staffUid == request.auth.uid
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time;
+      allow update: if isValidId(loanId)
+        && isStaff()
+        && isValidLoan(incoming())
+        && (existing().status != 'Selesai' || isAdmin())
+        && incoming().numericId == existing().numericId
+        && incoming().loanNumber == existing().loanNumber
+        && incoming().memberId == existing().memberId
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && (
+          isAdmin()
+          || incoming().diff(existing()).affectedKeys().hasOnly(['dueDate', 'status', 'items', 'notes', 'updatedAt'])
+        );
+      allow delete: if false;
+    }
+
+    // 13. Returns (Append-Only Ledger)
+    match /returns/{returnId} {
+      allow get: if isValidId(returnId) && (isStaff() || (isVerifiedUser() && existing().ownerUid == request.auth.uid));
+      allow list: if isStaff() || (isVerifiedUser() && resource.data.ownerUid == request.auth.uid);
+      allow create: if isValidId(returnId)
+        && isStaff()
+        && isValidReturnRecord(incoming())
+        && existsAfter(/databases/$(database)/documents/loans/$(incoming().loanId))
+        && existsAfter(/databases/$(database)/documents/book_copies/$(incoming().copyId))
+        && incoming().staffUid == request.auth.uid
+        && incoming().createdAt == request.time;
+      allow update, delete: if false;
+    }
+
+    // 14. Reservations
+    match /reservations/{reservationId} {
+      allow get: if isValidId(reservationId) && (isStaff() || (isVerifiedUser() && existing().ownerUid == request.auth.uid));
+      allow list: if isStaff() || (isVerifiedUser() && resource.data.ownerUid == request.auth.uid);
+      allow create: if isValidId(reservationId)
+        && isVerifiedUser()
+        && isValidReservation(incoming())
+        && existsAfter(/databases/$(database)/documents/books/$(incoming().bookId))
+        && existsAfter(/databases/$(database)/documents/members/$(incoming().memberId))
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time
+        && (isStaff() || (incoming().ownerUid == request.auth.uid && incoming().status == 'Menunggu'));
+      allow update: if isValidId(reservationId)
+        && isVerifiedUser()
+        && isValidReservation(incoming())
+        && (existing().status in ['Menunggu', 'Tersedia'] || isAdmin())
+        && incoming().numericId == existing().numericId
+        && incoming().bookId == existing().bookId
+        && incoming().memberId == existing().memberId
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && (
+          isAdmin()
+          || (isStaff() && incoming().diff(existing()).affectedKeys().hasOnly(['copyId', 'inventoryCode', 'queuePosition', 'status', 'expiresAt', 'notes', 'updatedAt']))
+          || (existing().ownerUid == request.auth.uid && incoming().status == 'Dibatalkan' && incoming().diff(existing()).affectedKeys().hasOnly(['status', 'updatedAt']))
+        );
+      allow delete: if false;
+    }
+
+    // 15. Fines (Terminal Lock on 'Lunas' / 'Dibebaskan')
+    match /fines/{fineId} {
+      allow get: if isValidId(fineId) && (isStaff() || (isVerifiedUser() && existing().ownerUid == request.auth.uid));
+      allow list: if isStaff() || (isVerifiedUser() && resource.data.ownerUid == request.auth.uid);
+      allow create: if isValidId(fineId)
+        && isStaff()
+        && isValidFine(incoming())
+        && existsAfter(/databases/$(database)/documents/members/$(incoming().memberId))
+        && incoming().createdByUid == request.auth.uid
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time;
+      allow update: if isValidId(fineId)
+        && isStaff()
+        && isValidFine(incoming())
+        && (existing().status in ['Belum Lunas', 'Sebagian'] || isAdmin())
+        && incoming().numericId == existing().numericId
+        && incoming().fineNumber == existing().fineNumber
+        && incoming().memberId == existing().memberId
+        && incoming().amount == existing().amount
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && (
+          isAdmin()
+          || (incoming().status != 'Dibebaskan' && incoming().diff(existing()).affectedKeys().hasOnly(['paidAmount', 'status', 'updatedAt']))
+          || (isKepala() && incoming().diff(existing()).affectedKeys().hasOnly(['waivedAmount', 'status', 'reason', 'updatedAt']))
+        );
+      allow delete: if false;
+    }
+
+    // 16. Payments (Append-Only Financial Ledger)
+    match /payments/{paymentId} {
+      allow get: if isValidId(paymentId) && (isStaff() || (isVerifiedUser() && existing().ownerUid == request.auth.uid));
+      allow list: if isStaff() || (isVerifiedUser() && resource.data.ownerUid == request.auth.uid);
+      allow create: if isValidId(paymentId)
+        && isStaff()
+        && isValidPayment(incoming())
+        && existsAfter(/databases/$(database)/documents/fines/$(incoming().fineId))
+        && incoming().receivedByUid == request.auth.uid
+        && incoming().createdAt == request.time;
+      allow update, delete: if false;
+    }
+
+    // 17. Suppliers
+    match /suppliers/{supplierId} {
+      allow get: if isValidId(supplierId) && isStaff();
+      allow list: if isStaff();
+      allow create: if isValidId(supplierId)
+        && isStaff()
+        && isValidSupplier(incoming())
+        && incoming().createdAt == request.time;
+      allow update: if isValidId(supplierId)
+        && isStaff()
+        && isValidSupplier(incoming())
+        && incoming().diff(existing()).affectedKeys().hasOnly(['name', 'contactPerson', 'phone', 'email', 'address'])
+        && incoming().createdAt == existing().createdAt;
+      allow delete: if false;
+    }
+
+    // 18. Acquisitions (Kepala approval + Terminal Lock on 'Selesai' / 'Ditolak')
+    match /acquisitions/{acquisitionId} {
+      allow get: if isValidId(acquisitionId) && isStaff();
+      allow list: if isStaff();
+      allow create: if isValidId(acquisitionId)
+        && isStaff()
+        && isValidAcquisition(incoming())
+        && incoming().requestedByUid == request.auth.uid
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time;
+      allow update: if isValidId(acquisitionId)
+        && isStaff()
+        && isValidAcquisition(incoming())
+        && (!(existing().status in ['Selesai', 'Ditolak']) || isAdmin())
+        && incoming().numericId == existing().numericId
+        && incoming().requestNumber == existing().requestNumber
+        && incoming().requestedByUid == existing().requestedByUid
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && (
+          isAdmin()
+          || (isKepala() && incoming().diff(existing()).affectedKeys().hasOnly(['status', 'approvedByUid', 'approvedByName', 'orderDate', 'receivedDate', 'items', 'notes', 'updatedAt']))
+          || (!(incoming().status in ['Disetujui', 'Ditolak']) && incoming().diff(existing()).affectedKeys().hasOnly(['status', 'orderDate', 'receivedDate', 'items', 'notes', 'updatedAt']))
+        );
+      allow delete: if false;
+    }
+
+    // 19. Inventory Audits (Stock Opname)
+    match /inventory_audits/{auditId} {
+      allow get: if isValidId(auditId) && isStaff();
+      allow list: if isStaff();
+      allow create: if isValidId(auditId)
+        && isStaff()
+        && isValidInventoryAudit(incoming())
+        && incoming().conductedByUid == request.auth.uid
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time;
+      allow update: if isValidId(auditId)
+        && isStaff()
+        && isValidInventoryAudit(incoming())
+        && (existing().status != 'Selesai' || isAdmin())
+        && incoming().numericId == existing().numericId
+        && incoming().auditNumber == existing().auditNumber
+        && incoming().conductedByUid == existing().conductedByUid
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && (
+          isAdmin()
+          || incoming().diff(existing()).affectedKeys().hasOnly(['completedAt', 'status', 'totalExpected', 'totalScanned', 'totalDiscrepancy', 'notes', 'items', 'updatedAt'])
+        );
+      allow delete: if false;
+    }
+
+    // 20. Notifications
+    match /notifications/{notificationId} {
+      allow get: if isValidId(notificationId) && (isStaff() || (isVerifiedUser() && existing().targetUid == request.auth.uid));
+      allow list: if isStaff() || (isVerifiedUser() && resource.data.targetUid == request.auth.uid);
+      allow create: if isValidId(notificationId)
+        && isStaff()
+        && isValidNotification(incoming())
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time;
+      allow update: if isValidId(notificationId)
+        && isVerifiedUser()
+        && isValidNotification(incoming())
+        && incoming().numericId == existing().numericId
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && (isStaff() || existing().targetUid == request.auth.uid)
+        && incoming().diff(existing()).affectedKeys().hasOnly(['isRead', 'updatedAt']);
+      allow delete: if false;
+    }
+
+    // 21. Library Settings & RBAC Matrix
+    match /library_settings/{settingId} {
+      allow get: if isValidId(settingId) && (settingId == 'global' || isStaff());
+      allow list: if isStaff();
+      allow create: if isValidId(settingId)
+        && isStaff()
+        && isValidLibrarySetting(incoming())
+        && incoming().updatedByUid == request.auth.uid
+        && incoming().updatedAt == request.time;
+      allow update: if isValidId(settingId)
+        && isAdmin()
+        && isValidLibrarySetting(incoming())
+        && incoming().kind == existing().kind
+        && incoming().updatedByUid == request.auth.uid
+        && incoming().updatedAt == request.time
+        && incoming().diff(existing()).affectedKeys().hasOnly(['values', 'rolePermissions', 'customRoles', 'seeded', 'updatedByUid', 'updatedAt']);
+      allow delete: if false;
+    }
+
+    // 22. Immutable Audit Logs
+    match /audit_logs/{logId} {
+      allow get: if isValidId(logId) && isStaff();
+      allow list: if isStaff();
+      allow create: if isValidId(logId)
+        && isStaff()
+        && isValidAuditLog(incoming())
+        && incoming().userUid == request.auth.uid
+        && incoming().createdAt == request.time;
+      allow update, delete: if false;
+    }
+
+    // 23. Class Reading Schedules
+    match /reading_schedules/{scheduleId} {
+      allow get: if isValidId(scheduleId) && (isStaff() || (isVerifiedUser() && existing().archived == false));
+      allow list: if isStaff() || (isVerifiedUser() && resource.data.archived == false);
+      allow create: if isValidId(scheduleId)
+        && isStaff()
+        && isValidReadingSchedule(incoming())
+        && incoming().createdByUid == request.auth.uid
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time;
+      allow update: if isValidId(scheduleId)
+        && isStaff()
+        && isValidReadingSchedule(incoming())
+        && incoming().numericId == existing().numericId
+        && incoming().scheduleCode == existing().scheduleCode
+        && incoming().createdByUid == existing().createdByUid
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && (
+          isAdmin()
+          || incoming().diff(existing()).affectedKeys().hasOnly([
+            'className', 'gradeLevel', 'homeroomTeacher', 'companionTeacher', 'studentCount', 'dayOfWeek', 'scheduleDate',
+            'startTime', 'endTime', 'roomArea', 'readingMode', 'readingTheme', 'bookId', 'bookNumericId',
+            'bookTitle', 'status', 'studentsPresent', 'booksReadCount', 'sessionNotes', 'completedAt',
+            'sessionLogs', 'archived', 'updatedAt'
+          ])
+        );
+      allow delete: if false;
+    }
+
+    // 24. School Classes (Wali Kelas, Guru Pendamping & Daftar Siswa)
+    match /school_classes/{classId} {
+      allow get: if isValidId(classId) && isVerifiedUser();
+      allow list: if isVerifiedUser();
+      allow create: if isValidId(classId)
+        && isStaff()
+        && isValidSchoolClass(incoming())
+        && incoming().updatedByUid == request.auth.uid
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time;
+      allow update: if isValidId(classId)
+        && isStaff()
+        && isValidSchoolClass(incoming())
+        && incoming().className == existing().className
+        && incoming().gradeLevel == existing().gradeLevel
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedByUid == request.auth.uid
+        && incoming().updatedAt == request.time
+        && incoming().diff(existing()).affectedKeys().hasOnly([
+          'homeroomTeacher', 'companionTeacher', 'students', 'updatedByUid', 'updatedAt'
+        ]);
+      allow delete: if false;
+    }
+
+    // 25. Backup Snapshots (Admin-Only, Append-Only, Cleanable by Admin)
+    match /backup_snapshots/{snapshotId} {
+      allow get: if isValidId(snapshotId) && isAdmin();
+      allow list: if isAdmin();
+      allow create: if isValidId(snapshotId)
+        && isAdmin()
+        && isValidBackupSnapshot(incoming())
+        && incoming().createdByUid == request.auth.uid
+        && incoming().createdAt == request.time;
+      allow update: if false;
+      allow delete: if isValidId(snapshotId) && isAdmin();
+    }
+  }
+}

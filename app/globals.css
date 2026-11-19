@@ -1,0 +1,37 @@
+@import "tailwindcss";
+@import "tw-animate-css";
+
+@theme inline {
+  --font-sans: var(--font-plus-jakarta), ui-sans-serif, system-ui, sans-serif;
+  --font-serif: var(--font-lora), Georgia, Cambria, "Times New Roman", serif;
+  --font-display: var(--font-lora), Georgia, serif;
+  --font-mono: var(--font-jetbrains-mono), ui-monospace, SFMono-Regular, monospace;
+}
+
+@layer base {
+  body {
+    font-family: var(--font-sans);
+    background-color: #f4f3ee;
+    color: #1e2433;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+
+  h1, h2, h3, h4, .font-display, .font-serif {
+    font-family: var(--font-serif);
+  }
+}
+
+.tabular-nums {
+  font-variant-numeric: tabular-nums;
+}
+
+@media print {
+  .no-print {
+    display: none !important;
+  }
+  body {
+    background-color: #ffffff !important;
+    color: #000000 !important;
+  }
+}
