@@ -7,9 +7,12 @@ import {
   computeRestoreDiff,
   computeTablesChecksum,
   evaluateBackupHealth,
+  extractCirculationPolicy,
+  extractLibraryIdentity,
   formatBytes,
   guardSuperAdminLockout,
   normalizeSelectedModules,
+  parseNumberSetting,
   resolveTablesForModules,
   sha256Hex,
   validateBackupEnvelope,
@@ -202,3 +205,83 @@ test('RBAC & policy validators block lockout, invalid roles, bad policies, and w
   assert.equal(formatBytes(2048), '2.0 KB');
   assert.equal(formatBytes(1_572_864), '1.50 MB');
 });
+
+test('parseNumberSetting preserves explicit zero and enforces bounds', () => {
+  assert.equal(parseNumberSetting('0', 5, 0), 0);
+  assert.equal(parseNumberSetting(0, 5, 0), 0);
+  assert.equal(parseNumberSetting('', 5, 0), 5);
+  assert.equal(parseNumberSetting(undefined, 5, 0), 5);
+  assert.equal(parseNumberSetting('-2', 5, 0), 5);
+  assert.equal(parseNumberSetting('99', 5, 0, 14), 14);
+  assert.equal(parseNumberSetting('3', 1, 1, 30), 3);
+});
+
+test('extractLibraryIdentity prefers operational_hours over legacy operating_hours and maps all school fields', () => {
+  const fromModern = extractLibraryIdentity({
+    library_name: 'Perpustakaan SDN Nusantara 01',
+    library_tagline: 'Membaca Membuka Dunia',
+    operational_hours: 'Senin–Sabtu 07.30–13.00 WIB',
+    operating_hours: 'Lama 07.00–14.00',
+    library_address: 'Jl. Merdeka No. 1',
+    library_phone: '(021) 888-1234',
+    library_email: 'info@sdn1.sch.id',
+    library_website: 'https://sdn1.sch.id',
+    school_npsn: '20199999',
+    principal_name: 'Drs. Budi Santoso',
+    librarian_head_name: 'Rina Marlina, S.IP.',
+    academic_year: '2027/2028',
+    semester: 'Genap',
+    enable_opac_public: 'false',
+  });
+  assert.equal(fromModern.name, 'Perpustakaan SDN Nusantara 01');
+  assert.equal(fromModern.operatingHours, 'Senin–Sabtu 07.30–13.00 WIB');
+  assert.equal(fromModern.npsn, '20199999');
+  assert.equal(fromModern.principalName, 'Drs. Budi Santoso');
+  assert.equal(fromModern.librarianHeadName, 'Rina Marlina, S.IP.');
+  assert.equal(fromModern.academicYear, '2027/2028');
+  assert.equal(fromModern.semester, 'Genap');
+  assert.equal(fromModern.enableOpacPublic, false);
+
+  const fromLegacy = extractLibraryIdentity({
+    operating_hours: 'Senin–Jumat 08.00–15.00 WIB',
+  });
+  assert.equal(fromLegacy.operatingHours, 'Senin–Jumat 08.00–15.00 WIB');
+  assert.equal(fromLegacy.enableOpacPublic, true);
+});
+
+test('extractCirculationPolicy honors explicit zero values, reservation_expiry_days, and boolean switches', () => {
+  const policy = extractCirculationPolicy({
+    grace_period_days: '0',
+    default_damage_fee_percent: '0',
+    lost_book_fee_percent: '0',
+    block_on_unpaid_fines_limit: '0',
+    reservation_expiry_days: '5',
+    reservation_pickup_hours: '48',
+    auto_reminder_days_before_due: '4',
+    allow_partial_fine_payment: 'false',
+    allow_overdue_renewal: 'true',
+    enable_opac_public: 'false',
+    policy_application_mode: 'apply_to_active',
+  });
+  assert.equal(policy.gracePeriodDays, 0);
+  assert.equal(policy.damageFeePercent, 0);
+  assert.equal(policy.lostFeePercent, 0);
+  assert.equal(policy.blockOnUnpaidFinesLimit, 0);
+  assert.equal(policy.reservationExpiryDays, 5);
+  assert.equal(policy.autoReminderDaysBeforeDue, 4);
+  assert.equal(policy.allowPartialFinePayment, false);
+  assert.equal(policy.allowOverdueRenewal, true);
+  assert.equal(policy.enableOpacPublic, false);
+  assert.equal(policy.policyApplicationMode, 'apply_to_active');
+
+  const legacyFallback = extractCirculationPolicy({
+    reservation_pickup_hours: '96',
+    notify_due_days_before: '3',
+  });
+  assert.equal(legacyFallback.reservationExpiryDays, 4);
+  assert.equal(legacyFallback.autoReminderDaysBeforeDue, 3);
+  assert.equal(legacyFallback.allowPartialFinePayment, true);
+  assert.equal(legacyFallback.allowOverdueRenewal, false);
+  assert.equal(legacyFallback.policyApplicationMode, 'new_loans_only');
+});
+

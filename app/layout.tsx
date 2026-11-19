@@ -3,6 +3,7 @@ import { Lora, Plus_Jakarta_Sans, JetBrains_Mono } from 'next/font/google';
 import { Providers } from '@/components/Providers';
 import { getSessionUser } from '@/lib/auth/session';
 import { getDb, getSettingsMap } from '@/lib/db';
+import { extractLibraryIdentity } from '@/lib/domain/settings-backup-rules';
 import './globals.css';
 
 export const dynamic = 'force-dynamic';
@@ -29,32 +30,38 @@ const jetbrainsMono = JetBrains_Mono({
   display: 'swap',
 });
 
-export const metadata: Metadata = {
-  title: 'Lentera Pustaka — Sistem Perpustakaan Sekolah Dasar',
-  description:
-    'Sistem Manajemen Perpustakaan Sekolah Dasar (SD) untuk pengelolaan buku cerita dan pelajaran, keanggotaan siswa & guru, sirkulasi, reservasi, inventaris, dan laporan literasi.',
-  openGraph: {
-    title: 'Lentera Pustaka — Sistem Perpustakaan Sekolah Dasar',
-    description:
-      'Sistem Manajemen Perpustakaan Sekolah Dasar (SD) untuk pengelolaan buku cerita dan pelajaran, keanggotaan siswa & guru, sirkulasi, reservasi, inventaris, dan laporan literasi.',
-    type: 'website',
-  },
-  twitter: {
-    card: 'summary_large_image',
-    title: 'Lentera Pustaka — Sistem Perpustakaan Sekolah Dasar',
-    description:
-      'Sistem Manajemen Perpustakaan Sekolah Dasar (SD) untuk pengelolaan buku cerita dan pelajaran, keanggotaan siswa & guru, sirkulasi, reservasi, inventaris, dan laporan literasi.',
-  },
-};
+const DEFAULT_DESCRIPTION =
+  'Sistem Manajemen Perpustakaan Sekolah Dasar (SD) untuk pengelolaan buku cerita dan pelajaran, keanggotaan siswa & guru, sirkulasi, reservasi, inventaris, dan laporan literasi.';
 
-const DEFAULT_LIBRARY_IDENTITY = {
-  name: 'Perpustakaan SD Lentera Pustaka',
-  tagline: 'Taman Baca & Pusat Literasi Siswa Sekolah Dasar',
-  operatingHours: 'Senin–Jumat 07:00–14:30 | Sabtu 08:00–12:00',
-  address: '',
-  phone: '',
-  email: '',
-};
+export async function generateMetadata(): Promise<Metadata> {
+  const isFirestoreOnly =
+    (process.env.NEXT_PUBLIC_DATA_BACKEND || '').trim().toLowerCase() === 'firestore';
+  let identity = extractLibraryIdentity();
+  if (!isFirestoreOnly) {
+    try {
+      const db = getDb();
+      identity = extractLibraryIdentity(getSettingsMap(db));
+    } catch {
+      // fallback to defaults
+    }
+  }
+  const title = `${identity.name} — Sistem Perpustakaan Sekolah Dasar`;
+  const description = identity.tagline ? `${identity.tagline}. ${DEFAULT_DESCRIPTION}` : DEFAULT_DESCRIPTION;
+  return {
+    title,
+    description,
+    openGraph: {
+      title,
+      description,
+      type: 'website',
+    },
+    twitter: {
+      card: 'summary_large_image',
+      title,
+      description,
+    },
+  };
+}
 
 export default async function RootLayout({
   children,
@@ -66,7 +73,7 @@ export default async function RootLayout({
 
   let initialUser: Awaited<ReturnType<typeof getSessionUser>> | undefined = undefined;
   let initialUnreadNotifications = 0;
-  let initialLibrary = { ...DEFAULT_LIBRARY_IDENTITY };
+  let initialLibrary = extractLibraryIdentity();
 
   if (!isFirestoreOnly) {
     try {
@@ -92,14 +99,7 @@ export default async function RootLayout({
         initialUnreadNotifications = row.c;
       }
 
-      initialLibrary = {
-        name: settings.library_name || DEFAULT_LIBRARY_IDENTITY.name,
-        tagline: settings.library_tagline || DEFAULT_LIBRARY_IDENTITY.tagline,
-        operatingHours: settings.operating_hours || DEFAULT_LIBRARY_IDENTITY.operatingHours,
-        address: settings.library_address || '',
-        phone: settings.library_phone || '',
-        email: settings.library_email || '',
-      };
+      initialLibrary = extractLibraryIdentity(settings);
     } catch {
       // Serverless / read-only filesystem fallback: let client AuthProvider resolve Firebase session
       initialUser = undefined;

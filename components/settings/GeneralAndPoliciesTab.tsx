@@ -178,7 +178,7 @@ export function GeneralSettingsPanel({
             type="number"
             min={0}
             max={14}
-            value={settings.grace_period_days || '0'}
+            value={settings.grace_period_days ?? '0'}
             onChange={(e) => setVal('grace_period_days', e.target.value)}
             disabled={!canWrite}
           />
@@ -187,7 +187,7 @@ export function GeneralSettingsPanel({
             type="number"
             min={0}
             max={100}
-            value={settings.default_damage_fee_percent || '50'}
+            value={settings.default_damage_fee_percent ?? '50'}
             onChange={(e) => setVal('default_damage_fee_percent', e.target.value)}
             disabled={!canWrite}
           />
@@ -196,7 +196,7 @@ export function GeneralSettingsPanel({
             type="number"
             min={0}
             max={200}
-            value={settings.lost_book_fee_percent || '100'}
+            value={settings.lost_book_fee_percent ?? '100'}
             onChange={(e) => setVal('lost_book_fee_percent', e.target.value)}
             disabled={!canWrite}
           />
@@ -205,7 +205,7 @@ export function GeneralSettingsPanel({
             type="number"
             min={0}
             step={1000}
-            value={settings.block_on_unpaid_fines_limit || '25000'}
+            value={settings.block_on_unpaid_fines_limit ?? '25000'}
             onChange={(e) => setVal('block_on_unpaid_fines_limit', e.target.value)}
             disabled={!canWrite}
           />
@@ -214,16 +214,16 @@ export function GeneralSettingsPanel({
             type="number"
             min={1}
             max={14}
-            value={settings.reservation_expiry_days || '3'}
+            value={settings.reservation_expiry_days ?? '3'}
             onChange={(e) => setVal('reservation_expiry_days', e.target.value)}
             disabled={!canWrite}
           />
           <TextField
             label="Pengingat Jatuh Tempo (H-N Hari)"
             type="number"
-            min={1}
+            min={0}
             max={7}
-            value={settings.auto_reminder_days_before_due || '2'}
+            value={settings.auto_reminder_days_before_due ?? '2'}
             onChange={(e) => setVal('auto_reminder_days_before_due', e.target.value)}
             disabled={!canWrite}
           />

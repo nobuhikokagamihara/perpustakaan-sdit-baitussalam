@@ -51,7 +51,7 @@ const DEMO_ACCOUNTS = [
 function LoginContent() {
   const router = useRouter();
   const searchParams = useSearchParams();
-  const { user, loading: authLoading, loginWithCredentials, loginWithGoogle, logout } = useAuth();
+  const { user, library, loading: authLoading, loginWithCredentials, loginWithGoogle, logout } = useAuth();
   const { showToast } = useToast();
 
   const [email, setEmail] = useState('');
@@ -153,9 +153,10 @@ function LoginContent() {
             </Link>
 
             <h1 className="mt-6 font-serif text-2xl font-medium tracking-tight text-[#1E2433]">
-              Masuk ke Perpustakaan SD Lentera Pustaka
+              Masuk ke {library.name}
             </h1>
             <p className="mt-1.5 text-sm text-[#5C5E64]">
+              {library.tagline ? `${library.tagline}. ` : ''}
               {IS_FIRESTORE_ONLY_MODE
                 ? 'Masuk menggunakan akun Google untuk mengakses layanan perpustakaan berbasis Cloud Firestore.'
                 : 'Masuk menggunakan Google (Cloud Firestore) atau akun sekolah untuk mengakses layanan perpustakaan.'}

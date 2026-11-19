@@ -21,6 +21,7 @@ import {
   SelectField,
   TextField,
 } from '@/components/ui/DesignPrimitives';
+import { useAuth } from '@/components/ui/AuthProvider';
 import { useToast } from '@/components/ui/ToastProvider';
 import { gatewayFetch } from '@/lib/client/data-gateway';
 import { exportToCsv, exportToExcel, exportToPdf } from '@/lib/client/export';
@@ -39,6 +40,7 @@ export function ClassRosterPanel({
   canWrite,
   onDataChanged,
 }: ClassRosterPanelProps) {
+  const { library } = useAuth();
   const { showToast } = useToast();
   const [selectedClass, setSelectedClass] = useState<string>(
     initialClassName && SD_CLASSES.some((c) => c.className === initialClassName)
@@ -485,7 +487,8 @@ export function ClassRosterPanel({
               exportToPdf(
                 `data-siswa-${selectedClass.toLowerCase().replace(/\s+/g, '-')}`,
                 `Daftar Siswa & Rekap Kehadiran Baca — ${selectedClass}`,
-                exportRows
+                exportRows,
+                library
               )
             }
           >

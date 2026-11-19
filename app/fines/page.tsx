@@ -48,7 +48,7 @@ interface PaymentRow {
 }
 
 export default function FinesPage() {
-  const { user, loading: authLoading, can } = useAuth();
+  const { user, library, loading: authLoading, can } = useAuth();
   const { showToast } = useToast();
   const canReadFines = can('fines.read');
   const canPay = can('fines.pay');
@@ -56,6 +56,7 @@ export default function FinesPage() {
 
   const [fines, setFines] = useState<FineRow[]>([]);
   const [payments, setPayments] = useState<PaymentRow[]>([]);
+  const [allowPartialFinePayment, setAllowPartialFinePayment] = useState(true);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
@@ -77,6 +78,9 @@ export default function FinesPage() {
       if (!res.ok) throw new Error(data.error || 'Gagal memuat data denda.');
       setFines(data.fines || []);
       setPayments(data.payments || []);
+      if (data.policy && typeof data.policy.allowPartialFinePayment === 'boolean') {
+        setAllowPartialFinePayment(data.policy.allowPartialFinePayment);
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Gagal memuat data denda.');
     } finally {
@@ -94,6 +98,9 @@ export default function FinesPage() {
         if (active) {
           setFines(data.fines || []);
           setPayments(data.payments || []);
+          if (data.policy && typeof data.policy.allowPartialFinePayment === 'boolean') {
+            setAllowPartialFinePayment(data.policy.allowPartialFinePayment);
+          }
           setError(null);
         }
       })
@@ -340,12 +347,24 @@ export default function FinesPage() {
         maxWidth="max-w-md"
       >
         <form onSubmit={handlePay} className="space-y-4">
+          {!allowPartialFinePayment && payTarget && (
+            <div className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-900">
+              Kebijakan aktif: pembayaran denda cicilan dinonaktifkan di Pengaturan. Pelunasan wajib penuh sebesar{' '}
+              <span className="font-mono font-semibold tabular-nums">
+                {formatCurrencyIDR(
+                  Math.max(0, payTarget.amount - payTarget.paid_amount - payTarget.waived_amount)
+                )}
+              </span>
+              .
+            </div>
+          )}
           <TextField
             label="Nominal Pembayaran (Rp)"
             type="number"
             min={1}
             value={payAmount}
             onChange={(e) => setPayAmount(e.target.value)}
+            readOnly={!allowPartialFinePayment}
             required
           />
           <SelectField
@@ -408,10 +427,14 @@ export default function FinesPage() {
         {receipt && (
           <div className="space-y-4">
             <div className="rounded-lg border border-[#DFDCD4] bg-[#FAF9F5] p-5 text-xs space-y-2">
-              <p className="font-serif text-sm font-bold text-slate-900">
-                PERPUSTAKAAN LENTERA PUSTAKA
+              <p className="font-serif text-sm font-bold uppercase text-slate-900">
+                {library.name}
               </p>
-              <p className="text-slate-500">Kwitansi Pembayaran Resmi</p>
+              <p className="text-slate-500">
+                Kwitansi Pembayaran Resmi
+                {library.address ? ` · ${library.address}` : ''}
+                {library.phone ? ` · ${library.phone}` : ''}
+              </p>
               <div className="border-t border-dashed border-[#DFDCD4] pt-2 space-y-1.5">
                 <div className="flex justify-between">
                   <span className="text-slate-500">No. Pembayaran</span>

@@ -90,6 +90,10 @@ export default function LoansPage() {
   const [loans, setLoans] = useState<LoanRow[]>([]);
   const [members, setMembers] = useState<MemberOption[]>([]);
   const [allCopies, setAllCopies] = useState<CopyOption[]>([]);
+  const [loanPolicy, setLoanPolicy] = useState<{
+    blockOnUnpaidFinesLimit: number;
+    allowOverdueRenewal: boolean;
+  }>({ blockOnUnpaidFinesLimit: 25000, allowOverdueRenewal: false });
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
@@ -132,6 +136,12 @@ export default function LoansPage() {
       const loanData = await loanRes.json();
       if (!loanRes.ok) throw new Error(loanData.error || 'Gagal memuat transaksi peminjaman.');
       setLoans(loanData.loans || []);
+      if (loanData.policy) {
+        setLoanPolicy({
+          blockOnUnpaidFinesLimit: Number(loanData.policy.blockOnUnpaidFinesLimit ?? 25000),
+          allowOverdueRenewal: Boolean(loanData.policy.allowOverdueRenewal),
+        });
+      }
 
       if (isStaff) {
         const [memRes, invRes] = await Promise.all([
@@ -167,6 +177,12 @@ export default function LoansPage() {
         if (!loanRes.ok) throw new Error(loanData.error || 'Gagal memuat transaksi peminjaman.');
         if (active) {
           setLoans(loanData.loans || []);
+          if (loanData.policy) {
+            setLoanPolicy({
+              blockOnUnpaidFinesLimit: Number(loanData.policy.blockOnUnpaidFinesLimit ?? 25000),
+              allowOverdueRenewal: Boolean(loanData.policy.allowOverdueRenewal),
+            });
+          }
           setError(null);
         }
         if (isStaff) {
@@ -595,6 +611,20 @@ export default function LoansPage() {
               <option value="Selesai">Selesai</option>
             </select>
           </div>
+          <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-[#E7E4DC] bg-[#F4F3EE]/80 px-4 py-2 text-xs text-[#5C5E64]">
+            <span>
+              Batas tunggakan blokir pinjam:{' '}
+              <strong className="font-mono text-[#1E2433] tabular-nums">
+                {formatCurrencyIDR(loanPolicy.blockOnUnpaidFinesLimit)}
+              </strong>
+            </span>
+            <span>
+              Perpanjangan saat terlambat:{' '}
+              <strong className="text-[#1E2433]">
+                {loanPolicy.allowOverdueRenewal ? 'Diizinkan' : 'Tidak Diizinkan'}
+              </strong>
+            </span>
+          </div>
 
           {loading && <LoadingState rows={5} />}
           {error && <ErrorState message={error} onRetry={loadData} />}
@@ -644,16 +674,26 @@ export default function LoansPage() {
                                 </div>
                                 <div className="flex items-center gap-2">
                                   <StatusIndicator status={it.status} />
-                                  {!it.returned_at && (
-                                    <Button
-                                      variant="secondary"
-                                      size="sm"
-                                      onClick={() => handleRenew(loan.id, it.id)}
-                                    >
-                                      <RefreshCw className="h-3 w-3" />
-                                      Perpanjang ({it.renewal_count}/{loan.max_renewals})
-                                    </Button>
-                                  )}
+                                  {!it.returned_at && (() => {
+                                    const isOverdueItem = it.status === 'Terlambat' || it.due_date < formatIsoDate(new Date());
+                                    const blockedByOverduePolicy = isOverdueItem && !loanPolicy.allowOverdueRenewal;
+                                    return (
+                                      <Button
+                                        variant="secondary"
+                                        size="sm"
+                                        disabled={blockedByOverduePolicy}
+                                        title={
+                                          blockedByOverduePolicy
+                                            ? 'Perpanjangan saat terlambat dinonaktifkan di Pengaturan Sistem'
+                                            : undefined
+                                        }
+                                        onClick={() => handleRenew(loan.id, it.id)}
+                                      >
+                                        <RefreshCw className="h-3 w-3" />
+                                        Perpanjang ({it.renewal_count}/{loan.max_renewals})
+                                      </Button>
+                                    );
+                                  })()}
                                 </div>
                               </div>
                             ))}

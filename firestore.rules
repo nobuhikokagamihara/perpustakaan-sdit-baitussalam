@@ -44,6 +44,7 @@ service cloud.firestore {
     function isAdmin() {
       return isVerifiedUser() && (
         request.auth.token.email == 'nobuhikokagamihara@gmail.com'
+        || request.auth.token.email == 'arsip.raporbts@gmail.com'
         || (hasStaffDoc() && staffRole().isActive == true && staffRole().role == 'super_admin')
       );
     }

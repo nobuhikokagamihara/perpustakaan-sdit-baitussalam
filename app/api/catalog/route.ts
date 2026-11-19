@@ -1,8 +1,24 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { getDb } from '@/lib/db';
+import { getDb, getSettingsMap } from '@/lib/db';
+import { getSessionUser } from '@/lib/auth/session';
+import { extractCirculationPolicy } from '@/lib/domain/settings-backup-rules';
 
 export async function GET(req: NextRequest) {
   const db = getDb();
+  const policy = extractCirculationPolicy(getSettingsMap(db));
+  if (!policy.enableOpacPublic) {
+    const sessionUser = await getSessionUser();
+    if (!sessionUser) {
+      return NextResponse.json({
+        opacDisabled: true,
+        books: [],
+        categories: [],
+        newest: [],
+        mostBorrowed: [],
+      });
+    }
+  }
+
   const sp = req.nextUrl.searchParams;
   const q = (sp.get('q') || '').trim();
   const categoryId = sp.get('categoryId') || '';

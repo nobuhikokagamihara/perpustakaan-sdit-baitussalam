@@ -203,6 +203,7 @@ export function LibrarySpreadView({
 
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [opacDisabled, setOpacDisabled] = useState(false);
 
   const loadCatalog = useCallback(async () => {
     setLoading(true);
@@ -218,6 +219,7 @@ export function LibrarySpreadView({
       setCategories(data.categories || []);
       setNewest(data.newest || []);
       setMostBorrowed(data.mostBorrowed || []);
+      setOpacDisabled(Boolean(data.opacDisabled));
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Gagal memuat katalog.');
     } finally {
@@ -240,6 +242,7 @@ export function LibrarySpreadView({
           setCategories(data.categories || []);
           setNewest(data.newest || []);
           setMostBorrowed(data.mostBorrowed || []);
+          setOpacDisabled(Boolean(data.opacDisabled));
           setError(null);
         }
       })
@@ -253,7 +256,7 @@ export function LibrarySpreadView({
     return () => {
       active = false;
     };
-  }, [q, categoryId, user?.uid]);
+  }, [q, categoryId, user?.uid, library.enableOpacPublic]);
 
   useEffect(() => {
     if (!isStaffDashboard) return;
@@ -507,9 +510,7 @@ export function LibrarySpreadView({
         <p className="text-[11px] text-[#7B7D82]">
           {selectedDayInfo?.isSunday
             ? 'Minggu: Perpustakaan SD tutup — waktunya membaca di rumah.'
-            : selectedDayInfo?.isSaturday
-              ? 'Sabtu: Buka 08:00–12:00 WIB · Klub Literasi & Pengembalian'
-              : `${selectedIndoDay || selectedDayInfo?.label}: Buka 07:00–14:30 WIB · Jam Istirahat & Sirkulasi Siswa`}
+            : `${selectedIndoDay || selectedDayInfo?.label}: ${library.operatingHours}`}
         </p>
 
         {canReadSchedules && !selectedDayInfo?.isSunday && (
@@ -739,8 +740,32 @@ export function LibrarySpreadView({
               </div>
             </div>
 
+            {/* OPAC Public Disabled Guard for Unauthenticated Guests */}
+            {!user && (opacDisabled || library.enableOpacPublic === false) && (
+              <section className="my-auto rounded-2xl border border-[#DFDCD4] bg-[#FAF9F5] p-8 text-center max-w-xl mx-auto">
+                <p className="text-xs font-semibold uppercase tracking-wider text-[#E56B63]">
+                  {library.name}
+                </p>
+                <h1 className="mt-2 font-serif text-2xl font-medium text-[#1E2433]">
+                  Katalog Publik (OPAC) Sedang Dinonaktifkan
+                </h1>
+                <p className="mt-2 text-sm text-[#5C5E64]">
+                  Administrator perpustakaan membatasi akses katalog hanya untuk siswa, guru, dan petugas yang telah masuk ke sistem.
+                </p>
+                <div className="mt-5 flex justify-center">
+                  <Link
+                    href="/login"
+                    className="inline-flex items-center gap-2 rounded-full bg-[#222B3A] px-5 py-2.5 text-xs font-medium text-white hover:bg-[#161D28]"
+                  >
+                    <LogIn className="h-3.5 w-3.5" />
+                    Masuk Siswa / Petugas
+                  </Link>
+                </div>
+              </section>
+            )}
+
             {/* HERO SPREAD: Greeting + Open Book Centerpiece */}
-            {!q && !categoryId && (
+            {!(!user && (opacDisabled || library.enableOpacPublic === false)) && !q && !categoryId && (
               <section className="grid grid-cols-1 md:grid-cols-12 items-center gap-6 py-1">
                 <motion.div
                   initial={{ opacity: 0, y: 10 }}
@@ -837,6 +862,7 @@ export function LibrarySpreadView({
             )}
 
             {/* LOWER SECTION 1: Populer Saat Ini (Popular Now) */}
+            {!(!user && (opacDisabled || library.enableOpacPublic === false)) && (
             <section id="paling-populer" className="space-y-3">
               <div className="flex items-center justify-between">
                 <h2 className="font-serif text-[20px] font-medium text-[#1E2433]">
@@ -944,9 +970,10 @@ export function LibrarySpreadView({
                 </div>
               )}
             </section>
+            )}
 
             {/* LOWER SECTION 2: Koleksi Seri & Terbaru (New Series Collection) */}
-            {!loading && !q && !categoryId && seriesGroups.length > 0 && (
+            {!(!user && (opacDisabled || library.enableOpacPublic === false)) && !loading && !q && !categoryId && seriesGroups.length > 0 && (
               <section id="koleksi-terbaru" className="space-y-2 pt-0.5">
                 <div className="flex items-center justify-between">
                   <h2 className="font-serif text-[20px] font-medium text-[#1E2433]">

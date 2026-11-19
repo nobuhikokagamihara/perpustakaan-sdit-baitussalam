@@ -103,37 +103,32 @@ export async function gatewayFetch(input: string, init?: RequestInit): Promise<R
     return dispatchFirestoreApi(input, method, parsedBody, activeFirebaseActor);
   }
 
-  if (!activeFirebaseActor && method === 'GET' && input.startsWith('/api/catalog')) {
+  if (!activeFirebaseActor && IS_FIRESTORE_ONLY_MODE && method === 'GET' && input.startsWith('/api/catalog')) {
     try {
       const url = new URL(input, 'http://localhost:3000');
       const q = url.searchParams.get('q') || '';
       const categoryId = url.searchParams.get('categoryId') || '';
-      const fsData = await fetchFirestoreCatalogPublic(q, categoryId);
+      const fsData = await fetchFirestoreCatalogPublic(q, categoryId, false);
       if (fsData) {
         return new Response(JSON.stringify(fsData), {
           status: 200,
           headers: { 'Content-Type': 'application/json' },
         });
       }
-      if (IS_FIRESTORE_ONLY_MODE) {
-        return new Response(
-          JSON.stringify({ books: [], categories: [], newest: [], mostBorrowed: [] }),
-          {
-            status: 200,
-            headers: { 'Content-Type': 'application/json' },
-          }
-        );
-      }
+      return new Response(
+        JSON.stringify({ books: [], categories: [], newest: [], mostBorrowed: [] }),
+        {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        }
+      );
     } catch {
-      if (IS_FIRESTORE_ONLY_MODE) {
-        return new Response(
-          JSON.stringify({
-            error: 'Gagal terhubung ke Cloud Firestore. Periksa koneksi internet atau konfigurasi Firebase.',
-          }),
-          { status: 503, headers: { 'Content-Type': 'application/json' } }
-        );
-      }
-      // Fallback to SQLite endpoint if Firestore is offline or unseeded in hybrid mode
+      return new Response(
+        JSON.stringify({
+          error: 'Gagal terhubung ke Cloud Firestore. Periksa koneksi internet atau konfigurasi Firebase.',
+        }),
+        { status: 503, headers: { 'Content-Type': 'application/json' } }
+      );
     }
   }
 

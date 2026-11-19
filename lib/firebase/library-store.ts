@@ -60,8 +60,10 @@ import {
   buildBackupEnvelope,
   computeRestoreDiff,
   evaluateBackupHealth,
+  extractCirculationPolicy,
   guardSuperAdminLockout,
   normalizeSelectedModules,
+  parseNumberSetting,
   validateBackupEnvelope,
   validateCustomRoleInput,
   validateMembershipPolicyInput,
@@ -301,7 +303,31 @@ async function syncPublicCatalogForBook(bookDocId: string) {
   }
 }
 
-export async function fetchFirestoreCatalogPublic(q = '', categoryId = '') {
+export async function fetchFirestoreCatalogPublic(
+  q = '',
+  categoryId = '',
+  isAuthenticated = false
+) {
+  if (!isAuthenticated) {
+    try {
+      const globalSet = await getDocument('library_settings', 'global');
+      const policy = extractCirculationPolicy(
+        (globalSet?.values as Record<string, string>) || {}
+      );
+      if (!policy.enableOpacPublic) {
+        return {
+          opacDisabled: true,
+          books: [],
+          categories: [],
+          newest: [],
+          mostBorrowed: [],
+        };
+      }
+    } catch {
+      // Allow catalog fallback if global settings doc is unreadable
+    }
+  }
+
   const catalogDocs = await listCollection('public_catalog', [where('archived', '==', false)]);
 
   if (catalogDocs.length === 0) {
@@ -434,7 +460,7 @@ async function dispatchFirestoreApiInner(
   if (pathname === '/api/catalog' && method === 'GET') {
     const q = searchParams.get('q') || '';
     const categoryId = searchParams.get('categoryId') || '';
-    const res = await fetchFirestoreCatalogPublic(q, categoryId);
+    const res = await fetchFirestoreCatalogPublic(q, categoryId, true);
     if (!res) {
       if (IS_FIRESTORE_ONLY_MODE) {
         return jsonRes({ books: [], categories: [], newest: [], mostBorrowed: [] });
@@ -1569,9 +1595,15 @@ async function dispatchFirestoreApiInner(
   if (pathname === '/api/loans' && method === 'GET') {
     const q = (searchParams.get('q') || '').trim().toLowerCase();
     const statusFilter = searchParams.get('status') || '';
-    const loans = isStaff
-      ? await listCollection('loans')
-      : await listCollection('loans', [where('ownerUid', '==', actor.uid)]);
+    const [loans, globalSet] = await Promise.all([
+      isStaff
+        ? listCollection('loans')
+        : listCollection('loans', [where('ownerUid', '==', actor.uid)]),
+      getDocument('library_settings', 'global'),
+    ]);
+    const policy = extractCirculationPolicy(
+      (globalSet?.values as Record<string, string>) || {}
+    );
 
     const rows = loans
       .map((l) => ({
@@ -1583,7 +1615,7 @@ async function dispatchFirestoreApiInner(
         loan_date: String(l.loanDate || ''),
         due_date: String(l.dueDate || ''),
         status: String(l.status || 'Aktif'),
-        max_renewals: Number(l.maxRenewals || 1),
+        max_renewals: Number(l.maxRenewals ?? 1),
         items: ((l.items as Array<Record<string, unknown>>) || []).map((it) => ({
           id: Number(it.id || 1),
           copy_id: Number(String(it.copyId || '').replace('copy_', '')) || 0,
@@ -1607,7 +1639,13 @@ async function dispatchFirestoreApiInner(
       })
       .sort((a, b) => b.id - a.id);
 
-    return jsonRes({ loans: rows });
+    return jsonRes({
+      loans: rows,
+      policy: {
+        blockOnUnpaidFinesLimit: policy.blockOnUnpaidFinesLimit,
+        allowOverdueRenewal: policy.allowOverdueRenewal,
+      },
+    });
   }
 
   if (pathname === '/api/loans' && method === 'POST') {
@@ -1650,7 +1688,10 @@ async function dispatchFirestoreApiInner(
         (s, f) => s + Math.max(0, Number(f.amount || 0) - Number(f.paidAmount || 0) - Number(f.waivedAmount || 0)),
         0
       );
-    const blockLimit = Number((globalSet?.values as Record<string, string>)?.block_on_unpaid_fines_limit || 20000);
+    const loanPolicy = extractCirculationPolicy(
+      (globalSet?.values as Record<string, string>) || {}
+    );
+    const blockLimit = loanPolicy.blockOnUnpaidFinesLimit;
 
     const nextNum = nextNumericId(allLoans);
     const loanDocId = `loan_${nextNum}`;
@@ -1788,8 +1829,9 @@ async function dispatchFirestoreApiInner(
       getDocument('library_settings', 'global'),
       listCollection('reservations'),
     ]);
-    const allowOverdue =
-      (globalSet?.values as Record<string, string>)?.allow_overdue_renewal === 'true';
+    const allowOverdue = extractCirculationPolicy(
+      (globalSet?.values as Record<string, string>) || {}
+    ).allowOverdueRenewal;
 
     let newDueDate = '';
     try {
@@ -1935,13 +1977,15 @@ async function dispatchFirestoreApiInner(
       }))
       .sort((a, b) => b.id - a.id);
 
+    const retPolicy = extractCirculationPolicy(policyVals);
     return jsonRes({
       activeItems,
       returns: retRows,
       policy: {
-        gracePeriodDays: Number(policyVals.grace_period_days || 1),
-        damageFeePercent: Number(policyVals.default_damage_fee_percent || 50),
-        lostFeePercent: Number(policyVals.lost_book_fee_percent || 100),
+        gracePeriodDays: retPolicy.gracePeriodDays,
+        damageFeePercent: retPolicy.damageFeePercent,
+        lostFeePercent: retPolicy.lostFeePercent,
+        reservationExpiryDays: retPolicy.reservationExpiryDays,
       },
     });
   }
@@ -1965,10 +2009,13 @@ async function dispatchFirestoreApiInner(
       listCollection('reservations'),
       getDocument('library_settings', 'global'),
     ]);
-    const vals = (globalSet?.values as Record<string, string>) || {};
-    const graceDays = Number(vals.grace_period_days || 1);
-    const damagePercent = Number(vals.default_damage_fee_percent || 50);
-    const lostFeePercent = Number(vals.lost_book_fee_percent || 100);
+    const retPolicy = extractCirculationPolicy(
+      (globalSet?.values as Record<string, string>) || {}
+    );
+    const graceDays = retPolicy.gracePeriodDays;
+    const damagePercent = retPolicy.damageFeePercent;
+    const lostFeePercent = retPolicy.lostFeePercent;
+    const reservationExpiryDays = retPolicy.reservationExpiryDays;
 
     const nextRetNum = nextNumericId(returns);
     const retDocId = `ret_${nextRetNum}`;
@@ -2031,7 +2078,7 @@ async function dispatchFirestoreApiInner(
               copyId: copySnap.id,
               inventoryCode: String(copyData.inventoryCode || ''),
               status: 'Tersedia',
-              expiresAt: addDaysIso(todayStr, 2),
+              expiresAt: addDaysIso(todayStr, reservationExpiryDays),
               updatedAt: serverTimestamp(),
             });
           } else {
@@ -2263,11 +2310,15 @@ async function dispatchFirestoreApiInner(
             .sort((a, b) => Number(a.queuePosition || 0) - Number(b.queuePosition || 0))[0];
 
           if (nextWaiting) {
+            const globalSet = await getDocument('library_settings', 'global');
+            const resPolicy = extractCirculationPolicy(
+              (globalSet?.values as Record<string, string>) || {}
+            );
             await updateDoc(doc(db, 'reservations', nextWaiting.id), {
               copyId: String(target.copyId),
               inventoryCode: String(target.inventoryCode || ''),
               status: 'Tersedia',
-              expiresAt: addDaysIso(todayStr, 2),
+              expiresAt: addDaysIso(todayStr, resPolicy.reservationExpiryDays),
               updatedAt: serverTimestamp(),
             });
           } else {
@@ -2302,14 +2353,18 @@ async function dispatchFirestoreApiInner(
 
   // 8. /api/fines
   if (pathname === '/api/fines' && method === 'GET') {
-    const [fines, payments] = await Promise.all([
+    const [fines, payments, globalSet] = await Promise.all([
       isStaff
         ? listCollection('fines')
         : listCollection('fines', [where('ownerUid', '==', actor.uid)]),
       isStaff
         ? listCollection('payments')
         : listCollection('payments', [where('ownerUid', '==', actor.uid)]),
+      getDocument('library_settings', 'global'),
     ]);
+    const finePolicy = extractCirculationPolicy(
+      (globalSet?.values as Record<string, string>) || {}
+    );
 
     return jsonRes({
       fines: fines
@@ -2342,6 +2397,9 @@ async function dispatchFirestoreApiInner(
           notes: String(p.notes || ''),
         }))
         .sort((a, b) => b.id - a.id),
+      policy: {
+        allowPartialFinePayment: finePolicy.allowPartialFinePayment,
+      },
     });
   }
 
@@ -2350,8 +2408,9 @@ async function dispatchFirestoreApiInner(
     const fineDocId = `fine_${Number(body?.fineId || 0)}`;
     const action = String(body?.action || 'pay');
     const globalSet = await getDocument('library_settings', 'global');
-    const allowPartial =
-      (globalSet?.values as Record<string, string>)?.allow_partial_fine_payment !== 'false';
+    const allowPartial = extractCirculationPolicy(
+      (globalSet?.values as Record<string, string>) || {}
+    ).allowPartialFinePayment;
 
     if (action === 'waive') {
       if (!actor.permissions.includes('*') && !actor.permissions.includes('fines.waive')) {
@@ -3197,13 +3256,19 @@ async function dispatchFirestoreApiInner(
         listCollection('acquisitions'),
       ]);
       let generated = 0;
+      const globalSet = await getDocument('library_settings', 'global');
+      const notifPolicy = extractCirculationPolicy(
+        (globalSet?.values as Record<string, string>) || {}
+      );
+      const dueSoonLimit = addDaysIso(todayStr, notifPolicy.autoReminderDaysBeforeDue);
       let nextNum = nextNumericId(notifs);
       const batch = writeBatch(db);
 
       for (const l of loans) {
-        const overdue = ((l.items as Array<Record<string, unknown>>) || []).some(
-          (i) => !i.returnedAt && String(i.dueDate || l.dueDate) < todayStr
+        const activeItems = ((l.items as Array<Record<string, unknown>>) || []).filter(
+          (i) => !i.returnedAt
         );
+        const overdue = activeItems.some((i) => String(i.dueDate || l.dueDate) < todayStr);
         if (overdue && !notifs.some((n) => String(n.message).includes(String(l.loanNumber)))) {
           const num = nextNum++;
           batch.set(doc(db, 'notifications', `notif_${num}`), {
@@ -3215,6 +3280,33 @@ async function dispatchFirestoreApiInner(
             title: 'Keterlambatan Terdeteksi',
             message: `Transaksi ${l.loanNumber} (${l.memberName}) melewati tanggal jatuh tempo.`,
             link: '/returns',
+            isRead: false,
+            createdAt: serverTimestamp(),
+            updatedAt: serverTimestamp(),
+          });
+          generated++;
+        } else if (
+          !overdue &&
+          activeItems.some((i) => {
+            const d = String(i.dueDate || l.dueDate);
+            return d >= todayStr && d <= dueSoonLimit;
+          }) &&
+          !notifs.some(
+            (n) =>
+              n.title === 'Mendekati Jatuh Tempo' &&
+              String(n.message).includes(String(l.loanNumber))
+          )
+        ) {
+          const num = nextNum++;
+          batch.set(doc(db, 'notifications', `notif_${num}`), {
+            numericId: num,
+            targetUid: String(l.ownerUid || ''),
+            targetRole: l.ownerUid ? '' : 'all_staff',
+            memberId: String(l.memberId),
+            type: 'info',
+            title: 'Mendekati Jatuh Tempo',
+            message: `Pinjaman ${l.loanNumber} jatuh tempo pada ${String(l.dueDate)}.`,
+            link: '/loans',
             isRead: false,
             createdAt: serverTimestamp(),
             updatedAt: serverTimestamp(),
@@ -3319,10 +3411,19 @@ async function dispatchFirestoreApiInner(
       permission_count: rolePermissions.filter((rp) => rp.role_id === r.id).length,
     }));
 
+    const rawVals = (globalSet?.values as Record<string, string>) || {};
     const mergedSettings: Record<string, string> = {
       ...DEFAULT_SYSTEM_SETTINGS,
-      ...((globalSet?.values as Record<string, string>) || {}),
+      ...rawVals,
     };
+    if (!rawVals.operational_hours && rawVals.operating_hours) {
+      mergedSettings.operational_hours = rawVals.operating_hours;
+    }
+    if (!rawVals.reservation_expiry_days && rawVals.reservation_pickup_hours) {
+      mergedSettings.reservation_expiry_days = String(
+        Math.max(1, Math.ceil(parseNumberSetting(rawVals.reservation_pickup_hours, 72, 24) / 24))
+      );
+    }
 
     const sortedSnaps = snapshots
       .map((s) => ({ createdAt: tsToIso(s.createdAt) }))
@@ -3402,11 +3503,21 @@ async function dispatchFirestoreApiInner(
     if (section === 'general') {
       const incoming = (body?.settings as Record<string, string>) || {};
       const globalDoc = await getDocument('library_settings', 'global');
-      const merged = {
+      const merged: Record<string, string> = {
         ...DEFAULT_SYSTEM_SETTINGS,
         ...((globalDoc?.values as Record<string, string>) || {}),
         ...incoming,
       };
+      if (incoming.operational_hours !== undefined) {
+        merged.operating_hours = incoming.operational_hours;
+      }
+      if (incoming.reservation_expiry_days !== undefined) {
+        const days = Math.max(1, parseNumberSetting(incoming.reservation_expiry_days, 3, 1, 30));
+        merged.reservation_pickup_hours = String(days * 24);
+      }
+      if (incoming.auto_reminder_days_before_due !== undefined) {
+        merged.notify_due_days_before = incoming.auto_reminder_days_before_due;
+      }
       await updateDoc(doc(db, 'library_settings', 'global'), {
         values: merged,
         updatedByUid: actor.uid,
@@ -3429,7 +3540,16 @@ async function dispatchFirestoreApiInner(
       const check = validateMembershipPolicyInput(payload);
       if (!check.ok) return jsonRes({ error: check.reason }, 400);
 
-      await updateDoc(doc(db, 'membership_types', `mtype_${Number(mt.id)}`), {
+      const mtypeDocId = `mtype_${Number(mt.id)}`;
+      const [prevMtype, globalDoc] = await Promise.all([
+        getDocument('membership_types', mtypeDocId),
+        getDocument('library_settings', 'global'),
+      ]);
+      const policyMode = extractCirculationPolicy(
+        (globalDoc?.values as Record<string, string>) || {}
+      ).policyApplicationMode;
+
+      await updateDoc(doc(db, 'membership_types', mtypeDocId), {
         name: payload.name,
         maxLoans: payload.max_loans,
         loanDurationDays: payload.loan_duration_days,
@@ -3439,6 +3559,51 @@ async function dispatchFirestoreApiInner(
         allowReservation: mt.allow_reservation === false || mt.allow_reservation === 0 ? false : true,
         updatedAt: serverTimestamp(),
       });
+
+      if (policyMode === 'apply_to_active') {
+        const [members, loans] = await Promise.all([
+          listCollection('members'),
+          listCollection('loans'),
+        ]);
+        const targetMemberIds = new Set(
+          members.filter((m) => String(m.membershipTypeId) === mtypeDocId).map((m) => m.id)
+        );
+        const durationChanged =
+          Number(prevMtype?.loanDurationDays || payload.loan_duration_days) !==
+          payload.loan_duration_days;
+        const activeLoans = loans.filter(
+          (l) =>
+            targetMemberIds.has(String(l.memberId)) &&
+            ['Aktif', 'Terlambat', 'Sebagian Kembali'].includes(String(l.status))
+        );
+        for (const loan of activeLoans) {
+          const items = ((loan.items as Array<Record<string, unknown>>) || []).map((it) => {
+            if (!it.returnedAt && durationChanged && Number(it.renewalCount || 0) === 0) {
+              const recalculatedDue = addDaysIso(String(loan.loanDate), payload.loan_duration_days);
+              return {
+                ...it,
+                dueDate: recalculatedDue,
+                status: recalculatedDue < todayStr ? 'Terlambat' : 'Dipinjam',
+              };
+            }
+            return it;
+          });
+          const activeDueDates = items
+            .filter((i) => !i.returnedAt)
+            .map((i) => String(i.dueDate || loan.dueDate));
+          const maxDue = activeDueDates.sort().slice(-1)[0] || String(loan.dueDate);
+          const hasOverdue = activeDueDates.some((d) => d < todayStr);
+          const hasReturned = items.some((i) => Boolean(i.returnedAt));
+          await updateDoc(doc(db, 'loans', loan.id), {
+            maxRenewals: payload.max_renewals,
+            dueDate: maxDue,
+            status: hasOverdue ? 'Terlambat' : hasReturned ? 'Sebagian Kembali' : 'Aktif',
+            items,
+            updatedAt: serverTimestamp(),
+          });
+        }
+      }
+
       await writeAuditLog(actor, 'POLICY_UPDATE', 'membership_type', String(mt.id), `Perbarui kebijakan ${payload.name}`);
       return jsonRes({ ok: true });
     }

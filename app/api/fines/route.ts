@@ -3,17 +3,25 @@ import { getDb, getSettingsMap } from '@/lib/db';
 import { requirePermission } from '@/lib/auth/session';
 import { logAudit } from '@/lib/db/audit';
 import { validatePaymentAmount } from '@/lib/domain/library-rules';
+import { extractCirculationPolicy } from '@/lib/domain/settings-backup-rules';
 
 export async function GET() {
   const guard = await requirePermission('fines.read');
   if (guard.errorResponse) return guard.errorResponse;
 
   const db = getDb();
+  const policy = extractCirculationPolicy(getSettingsMap(db));
   let where = 'WHERE 1=1';
   const params: number[] = [];
 
   if (guard.user.roleSlug === 'anggota') {
-    if (!guard.user.memberId) return NextResponse.json({ fines: [], payments: [] });
+    if (!guard.user.memberId) {
+      return NextResponse.json({
+        fines: [],
+        payments: [],
+        policy: { allowPartialFinePayment: policy.allowPartialFinePayment },
+      });
+    }
     where += ' AND f.member_id = ?';
     params.push(guard.user.memberId);
   }
@@ -42,7 +50,11 @@ export async function GET() {
     )
     .all(...params);
 
-  return NextResponse.json({ fines, payments });
+  return NextResponse.json({
+    fines,
+    payments,
+    policy: { allowPartialFinePayment: policy.allowPartialFinePayment },
+  });
 }
 
 export async function POST(req: NextRequest) {
@@ -98,8 +110,8 @@ export async function POST(req: NextRequest) {
   const method = String(body.method || 'Tunai');
   const notes = String(body.notes || '');
 
-  const settings = getSettingsMap(db);
-  const allowPartial = settings.allow_partial_fine_payment !== 'false';
+  const policy = extractCirculationPolicy(getSettingsMap(db));
+  const allowPartial = policy.allowPartialFinePayment;
 
   try {
     const paymentResult = db.transaction(() => {

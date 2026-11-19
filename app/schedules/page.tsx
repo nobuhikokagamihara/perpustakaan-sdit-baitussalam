@@ -113,7 +113,7 @@ function toDomainRow(row: ScheduleRow): ReadingScheduleRecord {
 }
 
 export default function ReadingSchedulesPage() {
-  const { user, loading: authLoading, can } = useAuth();
+  const { user, library, loading: authLoading, can } = useAuth();
   const { showToast } = useToast();
   const canRead = can('schedules.read');
   const canWrite = can('schedules.write');
@@ -477,7 +477,12 @@ export default function ReadingSchedulesPage() {
             size="sm"
             disabled={schedules.length === 0}
             onClick={() =>
-              exportToPdf('jadwal-baca-kelas-sd', 'Jadwal Baca Buku Per Kelas SD Lentera Pustaka', exportRows)
+              exportToPdf(
+                'jadwal-baca-kelas-sd',
+                `Jadwal Baca Buku Per Kelas — ${library.name}`,
+                exportRows,
+                library
+              )
             }
           >
             <Download className="h-3.5 w-3.5" />

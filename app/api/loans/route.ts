@@ -9,6 +9,7 @@ import {
   type CopyStatus,
   type MemberStatus,
 } from '@/lib/domain/library-rules';
+import { extractCirculationPolicy } from '@/lib/domain/settings-backup-rules';
 
 export async function GET(req: NextRequest) {
   const guard = await requirePermission('loans.read');
@@ -32,10 +33,18 @@ export async function GET(req: NextRequest) {
   let where = 'WHERE 1=1';
   const params: Array<string | number> = [];
 
+  const policy = extractCirculationPolicy(getSettingsMap(db));
+
   // Scope Anggota strictly to own loans
   if (guard.user.roleSlug === 'anggota') {
     if (!guard.user.memberId) {
-      return NextResponse.json({ loans: [] });
+      return NextResponse.json({
+        loans: [],
+        policy: {
+          blockOnUnpaidFinesLimit: policy.blockOnUnpaidFinesLimit,
+          allowOverdueRenewal: policy.allowOverdueRenewal,
+        },
+      });
     }
     where += ' AND l.member_id = ?';
     params.push(guard.user.memberId);
@@ -82,7 +91,13 @@ export async function GET(req: NextRequest) {
     items: itemsStmt.all(loan.id),
   }));
 
-  return NextResponse.json({ loans: enriched });
+  return NextResponse.json({
+    loans: enriched,
+    policy: {
+      blockOnUnpaidFinesLimit: policy.blockOnUnpaidFinesLimit,
+      allowOverdueRenewal: policy.allowOverdueRenewal,
+    },
+  });
 }
 
 export async function POST(req: NextRequest) {
@@ -120,8 +135,8 @@ export async function POST(req: NextRequest) {
       }
     }
 
-    const settings = getSettingsMap(db);
-    const fineBlockLimit = Number(settings.block_on_unpaid_fines_limit || 50000);
+    const policy = extractCirculationPolicy(getSettingsMap(db));
+    const fineBlockLimit = policy.blockOnUnpaidFinesLimit;
     const today = formatIsoDate(new Date());
 
     const result = db.transaction(() => {

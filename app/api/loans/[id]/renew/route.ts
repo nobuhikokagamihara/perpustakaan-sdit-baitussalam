@@ -8,6 +8,7 @@ import {
   validateRenewalEligibility,
   type MemberStatus,
 } from '@/lib/domain/library-rules';
+import { extractCirculationPolicy } from '@/lib/domain/settings-backup-rules';
 
 export async function POST(
   req: NextRequest,
@@ -30,8 +31,8 @@ export async function POST(
   }
 
   const db = getDb();
-  const settings = getSettingsMap(db);
-  const allowOverdueRenewal = settings.allow_overdue_renewal === 'true';
+  const policy = extractCirculationPolicy(getSettingsMap(db));
+  const allowOverdueRenewal = policy.allowOverdueRenewal;
   const today = formatIsoDate(new Date());
 
   try {

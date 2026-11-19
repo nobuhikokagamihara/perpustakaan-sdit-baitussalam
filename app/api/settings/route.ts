@@ -1,13 +1,16 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { getDb } from '@/lib/db';
+import { getDb, getSettingsMap } from '@/lib/db';
 import { requirePermission } from '@/lib/auth/session';
 import { hashPassword } from '@/lib/auth/crypto';
 import { logAudit } from '@/lib/db/audit';
+import { addDaysIso, formatIsoDate } from '@/lib/domain/library-rules';
 import {
   DEFAULT_SYSTEM_SETTINGS,
   SYSTEM_ROLE_SLUGS,
   evaluateBackupHealth,
+  extractCirculationPolicy,
   guardSuperAdminLockout,
+  parseNumberSetting,
   validateCustomRoleInput,
   validateMembershipPolicyInput,
   validatePasswordStrength,
@@ -24,6 +27,14 @@ export async function GET() {
   }>;
   const settings: Record<string, string> = { ...DEFAULT_SYSTEM_SETTINGS };
   for (const r of settingsRows) settings[r.key] = r.value;
+  if (!settingsRows.some((r) => r.key === 'operational_hours') && settings.operating_hours) {
+    settings.operational_hours = settings.operating_hours;
+  }
+  if (!settingsRows.some((r) => r.key === 'reservation_expiry_days') && settings.reservation_pickup_hours) {
+    settings.reservation_expiry_days = String(
+      Math.max(1, Math.ceil(parseNumberSetting(settings.reservation_pickup_hours, 72, 24) / 24))
+    );
+  }
 
   const membershipTypes = db
     .prepare(
@@ -142,6 +153,20 @@ export async function PUT(req: NextRequest) {
         const cleanVal = String(v ?? '').trim().slice(0, 500);
         stmt.run(k, cleanVal, auth.id);
         afterMap[k] = cleanVal;
+
+        // Keep legacy alias keys in sync so all readers see identical values
+        if (k === 'operational_hours') {
+          stmt.run('operating_hours', cleanVal, auth.id);
+          afterMap.operating_hours = cleanVal;
+        } else if (k === 'reservation_expiry_days') {
+          const days = Math.max(1, parseNumberSetting(cleanVal, 3, 1, 30));
+          const hoursStr = String(days * 24);
+          stmt.run('reservation_pickup_hours', hoursStr, auth.id);
+          afterMap.reservation_pickup_hours = hoursStr;
+        } else if (k === 'auto_reminder_days_before_due') {
+          stmt.run('notify_due_days_before', cleanVal, auth.id);
+          afterMap.notify_due_days_before = cleanVal;
+        }
       }
       logAudit(db, {
         userId: auth.id,
@@ -186,6 +211,9 @@ export async function PUT(req: NextRequest) {
       return NextResponse.json({ error: validation.reason }, { status: 400 });
     }
 
+    const policyMode = extractCirculationPolicy(getSettingsMap(db)).policyApplicationMode;
+    const prevDuration = Number(existing.loan_duration_days || 7);
+
     db.transaction(() => {
       db.prepare(
         `UPDATE membership_types
@@ -202,6 +230,55 @@ export async function PUT(req: NextRequest) {
         payload.allow_reservation,
         id
       );
+
+      // When policy_application_mode === 'apply_to_active', update active non-renewed loans for this membership type
+      if (policyMode === 'apply_to_active' && payload.loan_duration_days !== prevDuration) {
+        const today = formatIsoDate(new Date());
+        const activeLoans = db
+          .prepare(
+            `SELECT l.id, l.loan_date
+             FROM loans l
+             JOIN members m ON m.id = l.member_id
+             WHERE m.membership_type_id = ?
+               AND l.status IN ('Aktif', 'Terlambat', 'Sebagian Kembali')`
+          )
+          .all(id) as Array<{ id: number; loan_date: string }>;
+
+        for (const loan of activeLoans) {
+          const recalculatedDue = addDaysIso(loan.loan_date, payload.loan_duration_days);
+          db.prepare(
+            `UPDATE loan_items
+             SET due_date = ?, status = CASE WHEN ? < ? THEN 'Terlambat' ELSE 'Dipinjam' END
+             WHERE loan_id = ? AND returned_at IS NULL AND renewal_count = 0`
+          ).run(recalculatedDue, recalculatedDue, today, loan.id);
+
+          const summary = db
+            .prepare(
+              `SELECT MAX(CASE WHEN returned_at IS NULL THEN due_date END) as max_due,
+                      SUM(CASE WHEN returned_at IS NULL AND due_date < ? THEN 1 ELSE 0 END) as overdue_count,
+                      SUM(CASE WHEN returned_at IS NOT NULL THEN 1 ELSE 0 END) as returned_count
+               FROM loan_items WHERE loan_id = ?`
+            )
+            .get(today, loan.id) as {
+            max_due: string | null;
+            overdue_count: number;
+            returned_count: number;
+          };
+
+          if (summary.max_due) {
+            const nextLoanStatus =
+              summary.overdue_count > 0
+                ? 'Terlambat'
+                : summary.returned_count > 0
+                  ? 'Sebagian Kembali'
+                  : 'Aktif';
+            db.prepare(
+              `UPDATE loans SET due_date = ?, status = ?, updated_at = datetime('now') WHERE id = ?`
+            ).run(summary.max_due, nextLoanStatus, loan.id);
+          }
+        }
+      }
+
       logAudit(db, {
         userId: auth.id,
         userName: auth.fullName,
@@ -209,7 +286,7 @@ export async function PUT(req: NextRequest) {
         entityType: 'membership_type',
         entityId: String(id),
         before: existing,
-        after: payload,
+        after: { ...payload, policyApplicationMode: policyMode },
       });
     })();
     return NextResponse.json({ ok: true });

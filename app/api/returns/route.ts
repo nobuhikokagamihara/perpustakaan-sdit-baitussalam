@@ -9,6 +9,7 @@ import {
   formatIsoDate,
   type CopyCondition,
 } from '@/lib/domain/library-rules';
+import { extractCirculationPolicy } from '@/lib/domain/settings-backup-rules';
 
 export async function GET() {
   const guard = await requirePermission('returns.write');
@@ -51,13 +52,16 @@ export async function GET() {
     )
     .all();
 
+  const policy = extractCirculationPolicy(settings);
+
   return NextResponse.json({
     returns,
     activeItems,
     policy: {
-      gracePeriodDays: Number(settings.grace_period_days || 1),
-      damageFeePercent: Number(settings.default_damage_fee_percent || 50),
-      lostFeePercent: Number(settings.lost_book_fee_percent || 100),
+      gracePeriodDays: policy.gracePeriodDays,
+      damageFeePercent: policy.damageFeePercent,
+      lostFeePercent: policy.lostFeePercent,
+      reservationExpiryDays: policy.reservationExpiryDays,
     },
   });
 }
@@ -83,11 +87,11 @@ export async function POST(req: NextRequest) {
     const condition: CopyCondition = rawCondition;
 
     const db = getDb();
-    const settings = getSettingsMap(db);
-    const graceDays = Number(settings.grace_period_days || 1);
-    const damageFeePercent = Number(settings.default_damage_fee_percent || 50);
-    const lostFeePercent = Number(settings.lost_book_fee_percent || 100);
-    const pickupHours = Number(settings.reservation_pickup_hours || 48);
+    const policy = extractCirculationPolicy(getSettingsMap(db));
+    const graceDays = policy.gracePeriodDays;
+    const damageFeePercent = policy.damageFeePercent;
+    const lostFeePercent = policy.lostFeePercent;
+    const reservationExpiryDays = policy.reservationExpiryDays;
     const today = formatIsoDate(new Date());
 
     const result = db.transaction(() => {
@@ -220,8 +224,7 @@ export async function POST(req: NextRequest) {
 
         if (nextRes) {
           newCopyStatus = 'Direservasi';
-          const expireDays = Math.max(1, Math.ceil(pickupHours / 24));
-          const expiresAt = addDaysIso(today, expireDays);
+          const expiresAt = addDaysIso(today, reservationExpiryDays);
           db.prepare(
             `UPDATE reservations
              SET status = 'Tersedia', copy_id = ?, notified_at = datetime('now'), expires_at = ?

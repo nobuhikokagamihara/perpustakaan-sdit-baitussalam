@@ -36,7 +36,7 @@ const TABS: Array<{ key: SettingsTabKey; label: string; icon: React.ComponentTyp
 ];
 
 export default function SettingsPage() {
-  const { user, loading: authLoading, can, authMode } = useAuth();
+  const { user, loading: authLoading, can, authMode, refreshSession } = useAuth();
   const { showToast } = useToast();
   const notify = useCallback(
     (msg: string, tone: 'success' | 'error' | 'info' = 'info') => {
@@ -76,6 +76,10 @@ export default function SettingsPage() {
       setLoading(false);
     }
   }, [fetchSettingsPayload]);
+
+  const handleSettingsMutated = useCallback(async () => {
+    await Promise.all([loadData(), refreshSession()]);
+  }, [loadData, refreshSession]);
 
   const userId = user?.id ?? null;
   useEffect(() => {
@@ -150,7 +154,7 @@ export default function SettingsPage() {
               settings={settingsDraft}
               onChange={setSettingsDraft}
               canWrite={canWrite}
-              onSaved={loadData}
+              onSaved={handleSettingsMutated}
               notify={notify}
             />
           )}
@@ -160,7 +164,7 @@ export default function SettingsPage() {
               membershipTypes={policiesDraft}
               onChange={setPoliciesDraft}
               canWrite={canWrite}
-              onSaved={loadData}
+              onSaved={handleSettingsMutated}
               notify={notify}
             />
           )}
@@ -173,7 +177,7 @@ export default function SettingsPage() {
               staffRoles={data.staffRoles}
               isFirebaseMode={isFirebaseMode}
               canWrite={canWrite}
-              onSaved={loadData}
+              onSaved={handleSettingsMutated}
               notify={notify}
             />
           )}
@@ -185,7 +189,7 @@ export default function SettingsPage() {
               currentUserId={user?.id}
               isFirebaseMode={isFirebaseMode}
               canWrite={canWrite}
-              onSaved={loadData}
+              onSaved={handleSettingsMutated}
               notify={notify}
             />
           )}
@@ -195,7 +199,7 @@ export default function SettingsPage() {
           {tab === 'backup' && (
             <BackupCenterTab
               canWrite={canWrite}
-              onSystemMutated={loadData}
+              onSystemMutated={handleSettingsMutated}
               notify={notify}
             />
           )}

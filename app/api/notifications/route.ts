@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { getDb, getSettingsMap } from '@/lib/db';
 import { requirePermission } from '@/lib/auth/session';
 import { addDaysIso, formatIsoDate } from '@/lib/domain/library-rules';
+import { extractCirculationPolicy } from '@/lib/domain/settings-backup-rules';
 
 export async function GET() {
   const guard = await requirePermission('notifications.read');
@@ -54,11 +55,9 @@ export async function PATCH(req: NextRequest) {
         { status: 403 }
       );
     }
-    const settings = getSettingsMap(db);
+    const policy = extractCirculationPolicy(getSettingsMap(db));
     const today = formatIsoDate(new Date());
-    const reminderDays = Number(
-      settings.auto_reminder_days_before_due || settings.notify_due_days_before || 2
-    );
+    const reminderDays = policy.autoReminderDaysBeforeDue;
     const dueSoonLimit = addDaysIso(today, reminderDays);
 
     let generated = 0;

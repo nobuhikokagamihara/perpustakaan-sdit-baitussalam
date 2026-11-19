@@ -1,15 +1,7 @@
 import { NextResponse } from 'next/server';
 import { getSessionUser } from '@/lib/auth/session';
 import { getDb, getSettingsMap } from '@/lib/db';
-
-const DEFAULT_LIBRARY = {
-  name: 'Perpustakaan SD Lentera Pustaka',
-  tagline: 'Taman Baca & Pusat Literasi Siswa Sekolah Dasar',
-  operatingHours: 'Senin–Jumat 07:00–14:30 | Sabtu 08:00–12:00',
-  address: '',
-  phone: '',
-  email: '',
-};
+import { extractLibraryIdentity } from '@/lib/domain/settings-backup-rules';
 
 export async function GET() {
   const isFirestoreOnly =
@@ -20,7 +12,7 @@ export async function GET() {
       user: null,
       unreadNotifications: 0,
       backendMode: 'firestore',
-      library: DEFAULT_LIBRARY,
+      library: extractLibraryIdentity(),
     });
   }
 
@@ -52,21 +44,14 @@ export async function GET() {
       user,
       unreadNotifications,
       backendMode: 'hybrid',
-      library: {
-        name: settings.library_name || DEFAULT_LIBRARY.name,
-        tagline: settings.library_tagline || DEFAULT_LIBRARY.tagline,
-        operatingHours: settings.operating_hours || DEFAULT_LIBRARY.operatingHours,
-        address: settings.library_address || '',
-        phone: settings.library_phone || '',
-        email: settings.library_email || '',
-      },
+      library: extractLibraryIdentity(settings),
     });
   } catch {
     return NextResponse.json({
       user: null,
       unreadNotifications: 0,
       backendMode: 'firestore',
-      library: DEFAULT_LIBRARY,
+      library: extractLibraryIdentity(),
     });
   }
 }

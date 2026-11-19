@@ -146,8 +146,8 @@ export function AppShell({
         {/* Top Brand Mark */}
         <Link
           href="/"
-          title="Perpustakaan SD Lentera Pustaka"
-          aria-label="Beranda Perpustakaan SD Lentera Pustaka"
+          title={library.name}
+          aria-label={`Beranda ${library.name}`}
           className="flex h-10 w-10 items-center justify-center rounded-full text-[#1E2433] hover:bg-[#EFECE3] transition-colors"
         >
           <BookOpen className="h-5 w-5 stroke-[2]" />
@@ -227,9 +227,13 @@ export function AppShell({
               className="relative z-10 flex w-[300px] sm:w-80 flex-col bg-[#FAF9F5] border-r border-[#E7E4DC] shadow-2xl"
             >
               <div className="flex h-16 shrink-0 items-center justify-between border-b border-[#E7E4DC] px-5">
-                <div>
-                  <p className="font-serif text-base font-semibold text-[#1E2433]">Lentera Pustaka</p>
-                  <p className="text-[11px] text-[#7B7D82]">Perpustakaan Sekolah Dasar</p>
+                <div className="min-w-0 pr-2">
+                  <p className="truncate font-serif text-base font-semibold text-[#1E2433]">{library.name}</p>
+                  <p className="truncate text-[11px] text-[#7B7D82]">
+                    {library.academicYear
+                      ? `TA ${library.academicYear} · Semester ${library.semester || 'Ganjil'}`
+                      : library.tagline}
+                  </p>
                 </div>
                 <button
                   type="button"
@@ -345,7 +349,7 @@ export function AppShell({
               <Menu className="h-4 w-4" />
             </button>
             <Link href="/" className="font-serif text-base font-semibold text-[#1E2433] truncate">
-              Lentera Pustaka
+              {library.name}
             </Link>
           </div>
           <div className="flex items-center gap-2 shrink-0">
@@ -397,7 +401,10 @@ export function AppShell({
             {/* Editorial Top Bar for Operational Subpages */}
             <header className="no-print hidden lg:flex h-16 items-center justify-between gap-6 border-b border-[#E7E4DC] bg-[#FAF9F5] px-8">
               <div className="min-w-0">
-                <p className="truncate text-xs text-[#7B7D82]">{library.name}</p>
+                <p className="truncate text-xs text-[#7B7D82]">
+                  {library.name}
+                  {library.academicYear ? ` · TA ${library.academicYear} (${library.semester || 'Ganjil'})` : ''}
+                </p>
                 <p className="truncate font-serif text-base font-medium text-[#1E2433]">{title}</p>
               </div>
               <div className="flex items-center gap-3 shrink-0">

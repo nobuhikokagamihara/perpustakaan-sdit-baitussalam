@@ -57,7 +57,7 @@ interface MemberRow {
 }
 
 export default function MembersPage() {
-  const { user, loading: authLoading, can } = useAuth();
+  const { user, library, loading: authLoading, can } = useAuth();
   const { showToast } = useToast();
   const canReadMembers = can('members.read');
   const [members, setMembers] = useState<MemberRow[]>([]);
@@ -570,10 +570,20 @@ export default function MembersPage() {
           <div className="space-y-4">
             <div className="rounded-xl border border-[#DFDCD4] bg-[#FAF9F5] p-6">
               <div className="flex items-start justify-between gap-4 border-b border-[#E7E4DC] pb-4">
-                <div>
+                <div className="min-w-0">
                   <p className="text-[11px] font-semibold uppercase tracking-wider text-[#E56B63]">
-                    Perpustakaan SD Lentera Pustaka
+                    {library.name}
                   </p>
+                  {(library.npsn || library.academicYear) && (
+                    <p className="text-[10px] text-slate-500">
+                      {[
+                        library.npsn ? `NPSN ${library.npsn}` : '',
+                        library.academicYear ? `TA ${library.academicYear} (${library.semester || 'Ganjil'})` : '',
+                      ]
+                        .filter(Boolean)
+                        .join(' · ')}
+                    </p>
+                  )}
                   <h3 className="mt-1 font-serif text-lg font-bold text-slate-900">
                     {cardMember.full_name}
                   </h3>
@@ -599,6 +609,12 @@ export default function MembersPage() {
                   <dd className="font-mono font-semibold text-slate-900">{cardMember.expires_at}</dd>
                 </div>
               </dl>
+              {library.address && (
+                <p className="mt-3 border-t border-[#E7E4DC] pt-2.5 text-[10px] text-slate-500">
+                  {library.address}
+                  {library.phone ? ` · ${library.phone}` : ''}
+                </p>
+              )}
             </div>
             <div className="no-print flex justify-end gap-2">
               <Button variant="secondary" onClick={() => setCardMember(null)}>

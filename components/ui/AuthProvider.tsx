@@ -35,6 +35,12 @@ import {
   setLocalSessionToken,
 } from '@/lib/client/data-gateway';
 import { addDaysIso, formatIsoDate } from '@/lib/domain/library-rules';
+import {
+  extractLibraryIdentity,
+  type LibraryIdentity,
+} from '@/lib/domain/settings-backup-rules';
+
+export type { LibraryIdentity };
 
 export interface SessionUser {
   id: number;
@@ -47,15 +53,6 @@ export interface SessionUser {
   memberId: number | null;
   memberDocId?: string | null;
   permissions: string[];
-}
-
-export interface LibraryIdentity {
-  name: string;
-  tagline: string;
-  operatingHours: string;
-  address: string;
-  phone: string;
-  email: string;
 }
 
 interface AuthContextValue {
@@ -72,14 +69,7 @@ interface AuthContextValue {
   can: (permission: string) => boolean;
 }
 
-const defaultLibrary: LibraryIdentity = {
-  name: 'Perpustakaan SD Lentera Pustaka',
-  tagline: 'Taman Baca & Pusat Literasi Siswa Sekolah Dasar',
-  operatingHours: 'Senin–Jumat 07:00–14:30 | Sabtu 08:00–12:00',
-  address: '',
-  phone: '',
-  email: '',
-};
+const defaultLibrary: LibraryIdentity = extractLibraryIdentity();
 
 const ROLE_LABELS: Record<string, string> = {
   super_admin: 'Super Admin',
@@ -235,14 +225,7 @@ async function resolveFirebaseSession(fbUser: FirebaseUser): Promise<{
     const globalSnap = await getDoc(doc(db, 'library_settings', 'global'));
     if (globalSnap.exists()) {
       const vals = (globalSnap.data().values as Record<string, string>) || {};
-      libraryIdentity = {
-        name: vals.library_name || defaultLibrary.name,
-        tagline: vals.library_tagline || defaultLibrary.tagline,
-        operatingHours: vals.operating_hours || defaultLibrary.operatingHours,
-        address: vals.library_address || '',
-        phone: vals.library_phone || '',
-        email: vals.library_email || '',
-      };
+      libraryIdentity = extractLibraryIdentity(vals);
     }
   } catch {
     // Public fallback to defaultLibrary if unseeded yet
@@ -323,14 +306,7 @@ export function AuthProvider({
         const globalSnap = await getDoc(doc(db, 'library_settings', 'global'));
         if (globalSnap.exists()) {
           const vals = (globalSnap.data().values as Record<string, string>) || {};
-          setLibrary({
-            name: vals.library_name || defaultLibrary.name,
-            tagline: vals.library_tagline || defaultLibrary.tagline,
-            operatingHours: vals.operating_hours || defaultLibrary.operatingHours,
-            address: vals.library_address || '',
-            phone: vals.library_phone || '',
-            email: vals.library_email || '',
-          });
+          setLibrary(extractLibraryIdentity(vals));
         }
       } catch {
         // Public fallback to defaultLibrary if unseeded or offline
@@ -421,6 +397,13 @@ export function AuthProvider({
       unsubscribe();
     };
   }, [loadLocalSession]);
+
+  // Keep browser document title synchronized whenever library name is updated in /settings
+  useEffect(() => {
+    if (typeof document !== 'undefined' && library.name) {
+      document.title = `${library.name} — Sistem Perpustakaan Sekolah Dasar`;
+    }
+  }, [library.name]);
 
   // Real-time Firestore notification badge listener (bounded for Spark Free Tier read quota)
   const userRoleSlug = user?.roleSlug || '';

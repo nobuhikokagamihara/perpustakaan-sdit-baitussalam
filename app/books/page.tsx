@@ -52,7 +52,7 @@ interface CopyItem {
 }
 
 export default function BooksPage() {
-  const { user, loading: authLoading, can } = useAuth();
+  const { user, library, loading: authLoading, can } = useAuth();
   const { showToast } = useToast();
   const canManageBooks = can('books.write');
   const [books, setBooks] = useState<BookRow[]>([]);
@@ -297,7 +297,9 @@ export default function BooksPage() {
           </Button>
           <Button
             variant="secondary"
-            onClick={() => exportToPdf('koleksi-buku.pdf', 'Daftar Koleksi Perpustakaan', exportRows)}
+            onClick={() =>
+              exportToPdf('koleksi-buku.pdf', `Daftar Koleksi — ${library.name}`, exportRows, library)
+            }
           >
             Export PDF
           </Button>
@@ -821,7 +823,7 @@ export default function BooksPage() {
                   <QrCodeImage value={c.barcode} size={84} />
                   <div className="min-w-0">
                     <p className="text-[10px] font-semibold uppercase tracking-wider text-slate-500">
-                      Perpustakaan SD Lentera Pustaka
+                      {library.name}
                     </p>
                     <p className="line-clamp-2 text-xs font-semibold text-slate-900">
                       {labelTarget.book.title}

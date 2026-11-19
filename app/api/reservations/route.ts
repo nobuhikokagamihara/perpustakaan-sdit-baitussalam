@@ -3,6 +3,7 @@ import { getDb, getSettingsMap } from '@/lib/db';
 import { requirePermission } from '@/lib/auth/session';
 import { logAudit } from '@/lib/db/audit';
 import { addDaysIso, formatIsoDate } from '@/lib/domain/library-rules';
+import { extractCirculationPolicy } from '@/lib/domain/settings-backup-rules';
 
 export async function GET() {
   const guard = await requirePermission('reservations.read');
@@ -193,8 +194,7 @@ export async function PATCH(req: NextRequest) {
     );
   }
 
-  const settings = getSettingsMap(db);
-  const pickupHours = Number(settings.reservation_pickup_hours || 48);
+  const policy = extractCirculationPolicy(getSettingsMap(db));
   const today = formatIsoDate(new Date());
 
   db.transaction(() => {
@@ -213,8 +213,7 @@ export async function PATCH(req: NextRequest) {
           | undefined;
 
         if (nextWaiting) {
-          const expireDays = Math.max(1, Math.ceil(pickupHours / 24));
-          const expiresAt = addDaysIso(today, expireDays);
+          const expiresAt = addDaysIso(today, policy.reservationExpiryDays);
           db.prepare(
             `UPDATE reservations
              SET status = 'Tersedia', copy_id = ?, notified_at = datetime('now'), expires_at = ?

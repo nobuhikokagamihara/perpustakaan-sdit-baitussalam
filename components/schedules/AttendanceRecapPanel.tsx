@@ -20,6 +20,7 @@ import {
   SearchField,
   StatusIndicator,
 } from '@/components/ui/DesignPrimitives';
+import { useAuth } from '@/components/ui/AuthProvider';
 import { exportToCsv, exportToExcel, exportToPdf } from '@/lib/client/export';
 import {
   SD_CLASSES,
@@ -58,6 +59,7 @@ export function AttendanceRecapPanel({
   logs,
   initialClassFilter = '',
 }: AttendanceRecapPanelProps) {
+  const { library } = useAuth();
   const [classFilter, setClassFilter] = useState(initialClassFilter);
   const [q, setQ] = useState('');
   const [expandedIds, setExpandedIds] = useState<Record<string, boolean>>({});
@@ -225,7 +227,8 @@ export function AttendanceRecapPanel({
               exportToPdf(
                 'rekap-absensi-sesi-baca',
                 'Rekap Absensi Hadir & Tidak Hadir Sesi Baca Kelas SD',
-                exportRows
+                exportRows,
+                library
               )
             }
           >

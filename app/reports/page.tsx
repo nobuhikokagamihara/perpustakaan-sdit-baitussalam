@@ -33,7 +33,7 @@ const REPORT_TYPES = [
 ];
 
 export default function ReportsPage() {
-  const { user, loading: authLoading, can } = useAuth();
+  const { user, library, loading: authLoading, can } = useAuth();
   const canReadReports = can('reports.read');
   const [reportType, setReportType] = useState('loans');
   const [fromDate, setFromDate] = useState('2026-01-01');
@@ -124,7 +124,7 @@ export default function ReportsPage() {
           <Button
             variant="secondary"
             disabled={rows.length === 0}
-            onClick={() => exportToPdf(`laporan-${reportType}.pdf`, currentLabel, rows)}
+            onClick={() => exportToPdf(`laporan-${reportType}.pdf`, currentLabel, rows, library)}
           >
             PDF
           </Button>
@@ -186,6 +186,27 @@ export default function ReportsPage() {
 
         {!loading && !error && rows.length > 0 && (
           <div className="overflow-hidden rounded-lg border border-[#E7E4DC] bg-[#FAF9F5]">
+            <div className="border-b border-[#E7E4DC] bg-[#F7F6F1] px-5 py-4">
+              <p className="font-serif text-sm font-bold uppercase tracking-wide text-[#1E2433]">
+                {library.name}
+              </p>
+              <p className="mt-0.5 text-xs text-[#5C5E64]">
+                {[
+                  library.address,
+                  library.npsn ? `NPSN: ${library.npsn}` : '',
+                  library.phone ? `Telp: ${library.phone}` : '',
+                  library.email,
+                ]
+                  .filter(Boolean)
+                  .join(' · ')}
+              </p>
+              <p className="mt-0.5 text-[11px] text-[#7B7D82]">
+                Tahun Ajaran {library.academicYear || '-'} · Semester {library.semester || '-'} · Periode{' '}
+                <span className="font-mono tabular-nums">
+                  {fromDate} s/d {toDate}
+                </span>
+              </p>
+            </div>
             <div className="border-b border-[#E7E4DC] px-5 py-3.5 flex items-center justify-between">
               <h2 className="font-serif text-base font-semibold text-slate-900">
                 {currentLabel}
@@ -221,6 +242,24 @@ export default function ReportsPage() {
                 </tbody>
               </table>
             </div>
+            {(library.principalName || library.librarianHeadName) && (
+              <div className="grid grid-cols-1 gap-6 border-t border-[#E7E4DC] bg-[#FAF9F5] px-6 py-5 text-xs text-[#1E2433] sm:grid-cols-2">
+                <div>
+                  <p className="text-[#5C5E64]">Mengetahui,</p>
+                  <p className="font-medium">Kepala Sekolah</p>
+                  <p className="mt-10 font-semibold underline underline-offset-4">
+                    {library.principalName || '______________________'}
+                  </p>
+                </div>
+                <div className="sm:text-right">
+                  <p className="text-[#5C5E64]">Penanggung Jawab,</p>
+                  <p className="font-medium">Kepala Perpustakaan</p>
+                  <p className="mt-10 font-semibold underline underline-offset-4">
+                    {library.librarianHeadName || '______________________'}
+                  </p>
+                </div>
+              </div>
+            )}
           </div>
         )}
       </div>

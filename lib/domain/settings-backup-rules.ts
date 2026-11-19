@@ -845,3 +845,112 @@ export function formatBytes(bytes: number): string {
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
   return `${(bytes / (1024 * 1024)).toFixed(2)} MB`;
 }
+
+export interface LibraryIdentity {
+  name: string;
+  tagline: string;
+  operatingHours: string;
+  address: string;
+  phone: string;
+  email: string;
+  website: string;
+  npsn: string;
+  principalName: string;
+  librarianHeadName: string;
+  academicYear: string;
+  semester: string;
+  enableOpacPublic: boolean;
+}
+
+export interface CirculationPolicySettings {
+  gracePeriodDays: number;
+  damageFeePercent: number;
+  lostFeePercent: number;
+  blockOnUnpaidFinesLimit: number;
+  reservationExpiryDays: number;
+  autoReminderDaysBeforeDue: number;
+  allowPartialFinePayment: boolean;
+  allowOverdueRenewal: boolean;
+  enableOpacPublic: boolean;
+  policyApplicationMode: 'new_loans_only' | 'apply_to_active';
+}
+
+export function parseNumberSetting(
+  value: unknown,
+  fallback: number,
+  min = 0,
+  max?: number
+): number {
+  if (value === undefined || value === null || String(value).trim() === '') {
+    return fallback;
+  }
+  const num = Number(value);
+  if (!Number.isFinite(num) || num < min) {
+    return fallback;
+  }
+  if (max !== undefined && num > max) {
+    return max;
+  }
+  return num;
+}
+
+export function extractLibraryIdentity(
+  settings?: Record<string, string | undefined> | null
+): LibraryIdentity {
+  const s = settings || {};
+  const str = (key: string, fallback = '') => {
+    const v = s[key];
+    return typeof v === 'string' && v.trim().length > 0 ? v.trim() : fallback;
+  };
+  const hours =
+    str('operational_hours') ||
+    str('operating_hours') ||
+    DEFAULT_SYSTEM_SETTINGS.operational_hours;
+
+  return {
+    name: str('library_name', DEFAULT_SYSTEM_SETTINGS.library_name),
+    tagline: str('library_tagline', DEFAULT_SYSTEM_SETTINGS.library_tagline),
+    operatingHours: hours,
+    address: str('library_address', DEFAULT_SYSTEM_SETTINGS.library_address),
+    phone: str('library_phone', DEFAULT_SYSTEM_SETTINGS.library_phone),
+    email: str('library_email', DEFAULT_SYSTEM_SETTINGS.library_email),
+    website: str('library_website', DEFAULT_SYSTEM_SETTINGS.library_website),
+    npsn: str('school_npsn', DEFAULT_SYSTEM_SETTINGS.school_npsn),
+    principalName: str('principal_name', DEFAULT_SYSTEM_SETTINGS.principal_name),
+    librarianHeadName: str('librarian_head_name', DEFAULT_SYSTEM_SETTINGS.librarian_head_name),
+    academicYear: str('academic_year', DEFAULT_SYSTEM_SETTINGS.academic_year),
+    semester: str('semester', DEFAULT_SYSTEM_SETTINGS.semester),
+    enableOpacPublic: s.enable_opac_public !== 'false',
+  };
+}
+
+export function extractCirculationPolicy(
+  settings?: Record<string, string | undefined> | null
+): CirculationPolicySettings {
+  const s = settings || {};
+  let reservationExpiryDays = parseNumberSetting(s.reservation_expiry_days, -1, 1, 30);
+  if (reservationExpiryDays < 1) {
+    const legacyHours = parseNumberSetting(s.reservation_pickup_hours, 72, 24, 720);
+    reservationExpiryDays = Math.max(1, Math.ceil(legacyHours / 24));
+  }
+
+  const reminderRaw =
+    s.auto_reminder_days_before_due !== undefined && s.auto_reminder_days_before_due !== ''
+      ? s.auto_reminder_days_before_due
+      : s.notify_due_days_before;
+
+  return {
+    gracePeriodDays: parseNumberSetting(s.grace_period_days, 0, 0, 30),
+    damageFeePercent: parseNumberSetting(s.default_damage_fee_percent, 50, 0, 100),
+    lostFeePercent: parseNumberSetting(s.lost_book_fee_percent, 100, 0, 200),
+    blockOnUnpaidFinesLimit: parseNumberSetting(s.block_on_unpaid_fines_limit, 25000, 0),
+    reservationExpiryDays,
+    autoReminderDaysBeforeDue: parseNumberSetting(reminderRaw, 2, 0, 30),
+    allowPartialFinePayment: s.allow_partial_fine_payment !== 'false',
+    allowOverdueRenewal: s.allow_overdue_renewal === 'true',
+    enableOpacPublic: s.enable_opac_public !== 'false',
+    policyApplicationMode:
+      s.policy_application_mode === 'apply_to_active' ? 'apply_to_active' : 'new_loans_only',
+  };
+}
+
