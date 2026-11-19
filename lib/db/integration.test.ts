@@ -19,10 +19,36 @@ test('database migrations and seed populate all core tables idempotently', () =>
   const copies = (db.prepare('SELECT COUNT(*) as c FROM book_copies').get() as { c: number }).c;
   const members = (db.prepare('SELECT COUNT(*) as c FROM members').get() as { c: number }).c;
 
-  assert.equal(roles, 5);
+  assert.ok(roles >= 19);
   assert.ok(books >= 10);
   assert.ok(copies >= 25);
   assert.ok(members >= 8);
+
+  const requiredSlugs = [
+    'super_admin',
+    'kepala_sekolah',
+    'wakil_kepala_sekolah',
+    'kepala_perpustakaan',
+    'admin_perpus',
+    'pustakawan',
+    'staff_tu',
+    'bendahara_sekolah',
+    'operator_it',
+    'wali_kelas',
+    'guru_mapel',
+    'guru_pendamping',
+    'guru_bk',
+    'siswa',
+    'duta_literasi',
+    'komite_sekolah',
+    'petugas_kebersihan_keamanan',
+    'anggota',
+    'pengunjung',
+  ];
+  for (const slug of requiredSlugs) {
+    const found = db.prepare('SELECT id FROM roles WHERE slug = ?').get(slug);
+    assert.ok(found, `Expected seeded role ${slug} to exist`);
+  }
 
   // Idempotent seed check
   seedDatabase(db);
@@ -437,6 +463,89 @@ test('extending expiry preserves Diblokir status and sequential code lookup avoi
     insertedCodes.push(code);
   }
   assert.equal(new Set(insertedCodes).size, 2);
+  db.close();
+});
+
+test('signup role approval workflow, role switching, custom role creation, and member actions work end-to-end', () => {
+  const db = createTestDb();
+  const kepalaSekolahRole = db
+    .prepare("SELECT id, requires_approval FROM roles WHERE slug = 'kepala_sekolah'")
+    .get() as { id: number; requires_approval: number };
+  const adminPerpusRole = db
+    .prepare("SELECT id, requires_approval FROM roles WHERE slug = 'admin_perpus'")
+    .get() as { id: number; requires_approval: number };
+  const siswaRole = db
+    .prepare("SELECT id, requires_approval FROM roles WHERE slug = 'siswa'")
+    .get() as { id: number; requires_approval: number };
+
+  assert.equal(kepalaSekolahRole.requires_approval, 1);
+  assert.equal(adminPerpusRole.requires_approval, 1);
+  assert.equal(siswaRole.requires_approval, 0);
+
+  // Pending user signing up for Kepala Sekolah
+  const pendingId = Number(
+    db
+      .prepare(
+        `INSERT INTO users (username, email, full_name, password_hash, role_id, is_active, approval_status, requested_role_id)
+         VALUES ('kepsek.baru', 'kepsek@sd.id', 'Drs. Hasanuddin', 'hash', ?, 0, 'pending', ?)`
+      )
+      .run(kepalaSekolahRole.id, kepalaSekolahRole.id).lastInsertRowid
+  );
+  const pendingRow = db
+    .prepare('SELECT is_active, approval_status FROM users WHERE id = ?')
+    .get(pendingId) as { is_active: number; approval_status: string };
+  assert.equal(pendingRow.is_active, 0);
+  assert.equal(pendingRow.approval_status, 'pending');
+
+  // Super Admin approves and later changes role to Admin Perpus
+  db.prepare(
+    "UPDATE users SET is_active = 1, approval_status = 'approved', approved_at = datetime('now') WHERE id = ?"
+  ).run(pendingId);
+  db.prepare('UPDATE users SET role_id = ? WHERE id = ?').run(adminPerpusRole.id, pendingId);
+  const updatedUser = db
+    .prepare('SELECT u.is_active, u.approval_status, r.slug as role_slug FROM users u JOIN roles r ON r.id = u.role_id WHERE u.id = ?')
+    .get(pendingId) as { is_active: number; approval_status: string; role_slug: string };
+  assert.equal(updatedUser.is_active, 1);
+  assert.equal(updatedUser.approval_status, 'approved');
+  assert.equal(updatedUser.role_slug, 'admin_perpus');
+
+  // Custom role creation
+  const customRoleId = Number(
+    db
+      .prepare(
+        "INSERT INTO roles (slug, name, description, category, requires_approval, is_system) VALUES ('pembina_pramuka', 'Pembina Pramuka', 'Akses pojok baca pramuka', 'Kustom', 0, 0)"
+      )
+      .run().lastInsertRowid
+  );
+  assert.ok(customRoleId > 0);
+
+  // Member lifecycle: create -> block -> unblock -> deactivate -> archive -> restore
+  const mId = Number(
+    db
+      .prepare(
+        `INSERT INTO members (member_code, full_name, membership_type_id, registered_at, expires_at, status)
+         VALUES ('AGT-TEST-9999', 'Uji Anggota', 1, '2026-11-19', '2027-11-19', 'Aktif')`
+      )
+      .run().lastInsertRowid
+  );
+  db.prepare("UPDATE members SET status = 'Diblokir', block_reason = 'Terlambat' WHERE id = ?").run(mId);
+  db.prepare("UPDATE members SET status = 'Aktif', block_reason = '' WHERE id = ?").run(mId);
+  db.prepare("UPDATE members SET status = 'Nonaktif', archived_at = datetime('now') WHERE id = ?").run(mId);
+  const archivedMember = db.prepare('SELECT status, archived_at FROM members WHERE id = ?').get(mId) as {
+    status: string;
+    archived_at: string | null;
+  };
+  assert.equal(archivedMember.status, 'Nonaktif');
+  assert.ok(archivedMember.archived_at);
+
+  db.prepare("UPDATE members SET status = 'Aktif', archived_at = NULL WHERE id = ?").run(mId);
+  const restoredMember = db.prepare('SELECT status, archived_at FROM members WHERE id = ?').get(mId) as {
+    status: string;
+    archived_at: string | null;
+  };
+  assert.equal(restoredMember.status, 'Aktif');
+  assert.equal(restoredMember.archived_at, null);
+
   db.close();
 });
 

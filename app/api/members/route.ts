@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { getDb, getSettingsMap } from '@/lib/db';
 import { requirePermission } from '@/lib/auth/session';
 import { logAudit } from '@/lib/db/audit';
+import { generateNextMemberCode } from '@/lib/db/member-link';
 import { formatIsoDate, addDaysIso } from '@/lib/domain/library-rules';
 
 export async function GET(req: NextRequest) {
@@ -13,8 +14,14 @@ export async function GET(req: NextRequest) {
   const q = (sp.get('q') || '').trim();
   const status = sp.get('status') || '';
   const typeId = sp.get('typeId') || '';
+  const archivedMode = sp.get('archived') || 'exclude';
 
-  let where = 'WHERE m.archived_at IS NULL';
+  let where =
+    archivedMode === 'only'
+      ? 'WHERE m.archived_at IS NOT NULL'
+      : archivedMode === 'all'
+        ? 'WHERE 1=1'
+        : 'WHERE m.archived_at IS NULL';
   const params: Array<string | number> = [];
 
   if (q) {
@@ -65,15 +72,21 @@ export async function POST(req: NextRequest) {
     }
 
     const db = getDb();
+    const mTypeExists = db
+      .prepare('SELECT id FROM membership_types WHERE id = ?')
+      .get(membershipTypeId);
+    if (!mTypeExists) {
+      return NextResponse.json({ error: 'Jenis keanggotaan tidak valid.' }, { status: 400 });
+    }
+
     const settings = getSettingsMap(db);
     const prefix = settings.member_code_prefix || 'AGT-2026-';
     const today = formatIsoDate(new Date());
-    const expiresAt = body.expiresAt ? String(body.expiresAt) : addDaysIso(today, 365);
+    const expiresAt = body.expiresAt ? String(body.expiresAt).trim() : addDaysIso(today, 365);
 
-    const maxId = (db.prepare('SELECT COALESCE(MAX(id), 0) as m FROM members').get() as { m: number }).m;
     const memberCode = body.memberCode
       ? String(body.memberCode).trim()
-      : `${prefix}${String(maxId + 1).padStart(4, '0')}`;
+      : generateNextMemberCode(db, prefix);
 
     const duplicate = db.prepare('SELECT id FROM members WHERE member_code = ?').get(memberCode);
     if (duplicate) {

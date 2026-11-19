@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { getDb, getSettingsMap } from '@/lib/db';
 import { requirePermission } from '@/lib/auth/session';
 import { logAudit } from '@/lib/db/audit';
+import { generateNextMemberCode } from '@/lib/db/member-link';
 import { addDaysIso, formatIsoDate } from '@/lib/domain/library-rules';
 
 interface MemberImportRow {
@@ -113,20 +114,26 @@ export async function POST(req: NextRequest) {
     const today = formatIsoDate(new Date());
     const expiresAt = addDaysIso(today, 365);
 
-    const mTypes = db.prepare('SELECT id, name FROM membership_types ORDER BY id ASC').all() as Array<{
+    const mTypes = db.prepare('SELECT id, code, name FROM membership_types ORDER BY id ASC').all() as Array<{
       id: number;
+      code: string;
       name: string;
     }>;
 
     const insertedCount = db.transaction(() => {
-      let maxId = (db.prepare('SELECT COALESCE(MAX(id), 0) as m FROM members').get() as { m: number }).m;
       let count = 0;
 
       for (const r of toInsert) {
-        maxId++;
-        const memberCode = `${prefix}${String(maxId).padStart(4, '0')}`;
+        const memberCode = generateNextMemberCode(db, prefix);
+        const typeNeedle = r.typeName.trim().toLowerCase();
         const matchedType =
-          mTypes.find((mt) => mt.name.toLowerCase().includes(r.typeName.toLowerCase())) || mTypes[0];
+          (typeNeedle
+            ? mTypes.find(
+                (mt) =>
+                  mt.code.toLowerCase() === typeNeedle ||
+                  mt.name.toLowerCase().includes(typeNeedle)
+              )
+            : undefined) || mTypes[0];
 
         db.prepare(
           `INSERT INTO members (member_code, full_name, membership_type_id, identity_number, gender, unit_or_class, address, phone, email, registered_at, expires_at, status)

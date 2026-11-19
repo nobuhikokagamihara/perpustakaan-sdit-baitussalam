@@ -11,6 +11,7 @@ import {
   Eye,
   Plus,
   Printer,
+  RotateCcw,
   ShieldCheck,
   Upload,
   UserX,
@@ -51,6 +52,7 @@ interface MemberRow {
   expires_at: string;
   status: string;
   block_reason: string;
+  archived_at?: string | null;
   active_loans_count: number;
   max_loans: number;
   unpaid_fines_total: number;
@@ -60,10 +62,14 @@ export default function MembersPage() {
   const { user, library, loading: authLoading, can } = useAuth();
   const { showToast } = useToast();
   const canReadMembers = can('members.read');
+  const canWriteMembers = can('members.write');
+  const canBlockMembers = can('members.block');
   const [members, setMembers] = useState<MemberRow[]>([]);
   const [types, setTypes] = useState<Array<{ id: number; name: string }>>([]);
   const [q, setQ] = useState('');
   const [statusFilter, setStatusFilter] = useState('');
+  const [typeFilter, setTypeFilter] = useState('');
+  const [archivedFilter, setArchivedFilter] = useState<'exclude' | 'only'>('exclude');
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
@@ -79,9 +85,11 @@ export default function MembersPage() {
   const [blockTarget, setBlockTarget] = useState<MemberRow | null>(null);
   const [blockReason, setBlockReason] = useState('');
   const [archiveTarget, setArchiveTarget] = useState<MemberRow | null>(null);
+  const [actionBusy, setActionBusy] = useState(false);
 
   // Import state
   const [importOpen, setImportOpen] = useState(false);
+  const [importing, setImporting] = useState(false);
   const [importPreview, setImportPreview] = useState<{
     total: number;
     validCount: number;
@@ -107,6 +115,7 @@ export default function MembersPage() {
   const [phone, setPhone] = useState('');
   const [email, setEmail] = useState('');
   const [address, setAddress] = useState('');
+  const [expiresAt, setExpiresAt] = useState('');
   const [saving, setSaving] = useState(false);
 
   const loadMembers = useCallback(async () => {
@@ -116,6 +125,8 @@ export default function MembersPage() {
       const sp = new URLSearchParams();
       if (q) sp.set('q', q);
       if (statusFilter) sp.set('status', statusFilter);
+      if (typeFilter) sp.set('typeId', typeFilter);
+      if (archivedFilter === 'only') sp.set('archived', 'only');
       const res = await gatewayFetch(`/api/members?${sp.toString()}`, { cache: 'no-store' });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || 'Gagal memuat anggota.');
@@ -126,7 +137,7 @@ export default function MembersPage() {
     } finally {
       setLoading(false);
     }
-  }, [q, statusFilter]);
+  }, [q, statusFilter, typeFilter, archivedFilter]);
 
   useEffect(() => {
     if (authLoading || !user || !canReadMembers) return;
@@ -134,6 +145,8 @@ export default function MembersPage() {
     const sp = new URLSearchParams();
     if (q) sp.set('q', q);
     if (statusFilter) sp.set('status', statusFilter);
+    if (typeFilter) sp.set('typeId', typeFilter);
+    if (archivedFilter === 'only') sp.set('archived', 'only');
     gatewayFetch(`/api/members?${sp.toString()}`, { cache: 'no-store' })
       .then(async (res) => {
         const data = await res.json();
@@ -153,7 +166,7 @@ export default function MembersPage() {
     return () => {
       active = false;
     };
-  }, [authLoading, user, canReadMembers, q, statusFilter]);
+  }, [authLoading, user, canReadMembers, q, statusFilter, typeFilter, archivedFilter]);
 
   function openCreate() {
     setEditing(null);
@@ -165,6 +178,7 @@ export default function MembersPage() {
     setPhone('');
     setEmail('');
     setAddress('');
+    setExpiresAt('');
     setFormOpen(true);
   }
 
@@ -178,6 +192,7 @@ export default function MembersPage() {
     setPhone(m.phone || '');
     setEmail(m.email || '');
     setAddress(m.address || '');
+    setExpiresAt(m.expires_at || '');
     setFormOpen(true);
   }
 
@@ -201,6 +216,7 @@ export default function MembersPage() {
           phone,
           email,
           address,
+          ...(expiresAt ? { expiresAt } : {}),
         }),
       });
       const data = await res.json();
@@ -216,6 +232,7 @@ export default function MembersPage() {
   }
 
   async function handleMemberAction(member: MemberRow, action: string, extra?: Record<string, unknown>) {
+    setActionBusy(true);
     try {
       const res = await gatewayFetch(`/api/members/${member.id}`, {
         method: 'PUT',
@@ -223,14 +240,32 @@ export default function MembersPage() {
         body: JSON.stringify({ action, ...extra }),
       });
       const data = await res.json();
-      if (!res.ok) throw new Error(data.error || 'Gagal memperbarui status.');
-      showToast('success', 'Berhasil', `Status anggota ${member.full_name} diperbarui.`);
+      if (!res.ok) throw new Error(data.error || 'Gagal memperbarui anggota.');
+
+      const toastMsg =
+        action === 'extend'
+          ? `Masa berlaku ${member.full_name} diperpanjang hingga ${data.expiresAt || '1 tahun ke depan'}.`
+          : action === 'block'
+            ? `Anggota ${member.full_name} diblokir sementara.`
+            : action === 'unblock'
+              ? `Anggota ${member.full_name} diaktifkan kembali.`
+              : action === 'deactivate'
+                ? `Anggota ${member.full_name} dinonaktifkan.`
+                : action === 'archive'
+                  ? `Anggota ${member.full_name} berhasil diarsipkan.`
+                  : action === 'restore'
+                    ? `Anggota ${member.full_name} dipulihkan ke daftar aktif.`
+                    : `Data anggota ${member.full_name} diperbarui.`;
+
+      showToast('success', 'Berhasil', toastMsg);
       setBlockTarget(null);
       setArchiveTarget(null);
       setBlockReason('');
       loadMembers();
     } catch (err) {
       showToast('error', 'Gagal', err instanceof Error ? err.message : 'Error');
+    } finally {
+      setActionBusy(false);
     }
   }
 
@@ -250,6 +285,7 @@ export default function MembersPage() {
 
   async function handleImportFile(e: React.ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0];
+    e.target.value = '';
     if (!file) return;
     try {
       const parsedRows = await parseSpreadsheetFile(file);
@@ -268,6 +304,7 @@ export default function MembersPage() {
   }
 
   async function commitImport() {
+    setImporting(true);
     try {
       const res = await gatewayFetch('/api/members/import', {
         method: 'POST',
@@ -279,9 +316,12 @@ export default function MembersPage() {
       showToast('success', 'Import berhasil', `${data.importedCount} anggota baru ditambahkan.`);
       setImportOpen(false);
       setImportPreview(null);
+      setImportRawRows([]);
       loadMembers();
     } catch (err) {
       showToast('error', 'Import gagal', err instanceof Error ? err.message : 'Terjadi kesalahan');
+    } finally {
+      setImporting(false);
     }
   }
 
@@ -292,10 +332,12 @@ export default function MembersPage() {
       requiredPermission="members.read"
       actions={
         <>
-          <Button variant="secondary" onClick={() => setImportOpen(true)}>
-            <Upload className="h-4 w-4" />
-            Import CSV/Excel
-          </Button>
+          {canWriteMembers && (
+            <Button variant="secondary" onClick={() => setImportOpen(true)}>
+              <Upload className="h-4 w-4" />
+              Import CSV/Excel
+            </Button>
+          )}
           <Button
             variant="secondary"
             onClick={() =>
@@ -306,6 +348,7 @@ export default function MembersPage() {
                   Nomor_Anggota: m.member_code,
                   Nama: m.full_name,
                   Jenis: m.membership_type_name,
+                  NIS_NIP: m.identity_number,
                   Unit_Kelas: m.unit_or_class,
                   Email: m.email,
                   Telepon: m.phone,
@@ -318,21 +361,23 @@ export default function MembersPage() {
             <Download className="h-4 w-4" />
             Export Excel
           </Button>
-          <Button onClick={openCreate}>
-            <Plus className="h-4 w-4" />
-            Registrasi Anggota
-          </Button>
+          {canWriteMembers && (
+            <Button onClick={openCreate}>
+              <Plus className="h-4 w-4" />
+              Registrasi Anggota
+            </Button>
+          )}
         </>
       }
     >
-      <div className="space-y-4">
+      <div className={cardMember ? 'no-print space-y-4' : 'space-y-4'}>
         <div className="flex flex-wrap items-center gap-3 rounded-lg border border-[#E7E4DC] bg-[#FAF9F5] p-4">
           <SearchField
             value={q}
             onChange={setQ}
             placeholder="Cari nomor anggota, nama siswa/guru, kelas..."
             ariaLabel="Cari data anggota"
-            className="w-full sm:w-80"
+            className="w-full sm:w-72"
           />
           <select
             aria-label="Filter status anggota"
@@ -344,6 +389,28 @@ export default function MembersPage() {
             <option value="Aktif">Aktif</option>
             <option value="Diblokir">Diblokir</option>
             <option value="Nonaktif">Nonaktif</option>
+          </select>
+          <select
+            aria-label="Filter jenis keanggotaan"
+            value={typeFilter}
+            onChange={(e) => setTypeFilter(e.target.value)}
+            className="h-10 rounded-lg border border-[#E7E4DC] bg-[#FAF9F5] px-3 text-sm"
+          >
+            <option value="">Semua Jenis</option>
+            {types.map((t) => (
+              <option key={t.id} value={String(t.id)}>
+                {t.name}
+              </option>
+            ))}
+          </select>
+          <select
+            aria-label="Filter arsip anggota"
+            value={archivedFilter}
+            onChange={(e) => setArchivedFilter(e.target.value as 'exclude' | 'only')}
+            className="h-10 rounded-lg border border-[#E7E4DC] bg-[#FAF9F5] px-3 text-sm"
+          >
+            <option value="exclude">Anggota Aktif / Terdaftar</option>
+            <option value="only">Data Arsip</option>
           </select>
         </div>
 
@@ -409,7 +476,8 @@ export default function MembersPage() {
                             type="button"
                             onClick={() => openDetail(m)}
                             aria-label={`Riwayat ${m.full_name}`}
-                            className="rounded p-1.5 text-slate-500 hover:bg-slate-100 hover:text-slate-900"
+                            title="Lihat profil & riwayat"
+                            className="rounded p-1.5 text-slate-500 hover:bg-slate-100 hover:text-slate-900 cursor-pointer"
                           >
                             <Eye className="h-4 w-4" />
                           </button>
@@ -417,68 +485,100 @@ export default function MembersPage() {
                             type="button"
                             onClick={() => setCardMember(m)}
                             aria-label={`Kartu anggota ${m.full_name}`}
-                            className="rounded p-1.5 text-slate-500 hover:bg-slate-100 hover:text-slate-900"
+                            title="Kartu anggota QR"
+                            className="rounded p-1.5 text-slate-500 hover:bg-slate-100 hover:text-slate-900 cursor-pointer"
                           >
                             <CreditCard className="h-4 w-4" />
                           </button>
-                          <button
-                            type="button"
-                            onClick={() => handleMemberAction(m, 'extend', { days: 365 })}
-                            aria-label={`Perpanjang keanggotaan ${m.full_name}`}
-                            title="Perpanjang 1 tahun"
-                            className="rounded p-1.5 text-slate-500 hover:bg-slate-100 hover:text-[#E56B63]"
-                          >
-                            <CalendarPlus className="h-4 w-4" />
-                          </button>
-                          <button
-                            type="button"
-                            onClick={() => openEdit(m)}
-                            aria-label={`Edit ${m.full_name}`}
-                            className="rounded p-1.5 text-slate-500 hover:bg-slate-100 hover:text-slate-900"
-                          >
-                            <Edit3 className="h-4 w-4" />
-                          </button>
-                          {m.status === 'Diblokir' || m.status === 'Nonaktif' ? (
-                            <button
-                              type="button"
-                              onClick={() => handleMemberAction(m, 'unblock')}
-                              aria-label={`Aktifkan kembali ${m.full_name}`}
-                              title="Aktifkan kembali"
-                              className="rounded p-1.5 text-emerald-700 hover:bg-emerald-50"
-                            >
-                              <ShieldCheck className="h-4 w-4" />
-                            </button>
+                          {archivedFilter === 'only' ? (
+                            canWriteMembers && (
+                              <button
+                                type="button"
+                                disabled={actionBusy}
+                                onClick={() => handleMemberAction(m, 'restore')}
+                                aria-label={`Pulihkan ${m.full_name}`}
+                                title="Pulihkan anggota"
+                                className="rounded p-1.5 text-emerald-700 hover:bg-emerald-50 cursor-pointer disabled:opacity-50"
+                              >
+                                <RotateCcw className="h-4 w-4" />
+                              </button>
+                            )
                           ) : (
                             <>
-                              <button
-                                type="button"
-                                onClick={() => handleMemberAction(m, 'deactivate')}
-                                aria-label={`Nonaktifkan ${m.full_name}`}
-                                title="Nonaktifkan sementara"
-                                className="rounded p-1.5 text-slate-500 hover:bg-amber-50 hover:text-amber-700"
-                              >
-                                <UserX className="h-4 w-4" />
-                              </button>
-                              <button
-                                type="button"
-                                onClick={() => setBlockTarget(m)}
-                                aria-label={`Blokir ${m.full_name}`}
-                                title="Blokir sementara"
-                                className="rounded p-1.5 text-slate-500 hover:bg-red-50 hover:text-red-700"
-                              >
-                                <Ban className="h-4 w-4" />
-                              </button>
+                              {canWriteMembers && (
+                                <>
+                                  <button
+                                    type="button"
+                                    disabled={actionBusy}
+                                    onClick={() => handleMemberAction(m, 'extend', { days: 365 })}
+                                    aria-label={`Perpanjang keanggotaan ${m.full_name}`}
+                                    title="Perpanjang 1 tahun"
+                                    className="rounded p-1.5 text-slate-500 hover:bg-slate-100 hover:text-[#E56B63] cursor-pointer disabled:opacity-50"
+                                  >
+                                    <CalendarPlus className="h-4 w-4" />
+                                  </button>
+                                  <button
+                                    type="button"
+                                    onClick={() => openEdit(m)}
+                                    aria-label={`Edit ${m.full_name}`}
+                                    title="Edit profil anggota"
+                                    className="rounded p-1.5 text-slate-500 hover:bg-slate-100 hover:text-slate-900 cursor-pointer"
+                                  >
+                                    <Edit3 className="h-4 w-4" />
+                                  </button>
+                                </>
+                              )}
+                              {canBlockMembers &&
+                                (m.status === 'Diblokir' || m.status === 'Nonaktif' ? (
+                                  <button
+                                    type="button"
+                                    disabled={actionBusy}
+                                    onClick={() => handleMemberAction(m, 'unblock')}
+                                    aria-label={`Aktifkan kembali ${m.full_name}`}
+                                    title="Aktifkan kembali"
+                                    className="rounded p-1.5 text-emerald-700 hover:bg-emerald-50 cursor-pointer disabled:opacity-50"
+                                  >
+                                    <ShieldCheck className="h-4 w-4" />
+                                  </button>
+                                ) : (
+                                  <>
+                                    <button
+                                      type="button"
+                                      disabled={actionBusy}
+                                      onClick={() => handleMemberAction(m, 'deactivate')}
+                                      aria-label={`Nonaktifkan ${m.full_name}`}
+                                      title="Nonaktifkan sementara"
+                                      className="rounded p-1.5 text-slate-500 hover:bg-amber-50 hover:text-amber-700 cursor-pointer disabled:opacity-50"
+                                    >
+                                      <UserX className="h-4 w-4" />
+                                    </button>
+                                    <button
+                                      type="button"
+                                      onClick={() => {
+                                        setBlockReason('');
+                                        setBlockTarget(m);
+                                      }}
+                                      aria-label={`Blokir ${m.full_name}`}
+                                      title="Blokir sementara"
+                                      className="rounded p-1.5 text-slate-500 hover:bg-red-50 hover:text-red-700 cursor-pointer"
+                                    >
+                                      <Ban className="h-4 w-4" />
+                                    </button>
+                                  </>
+                                ))}
+                              {canWriteMembers && (
+                                <button
+                                  type="button"
+                                  onClick={() => setArchiveTarget(m)}
+                                  aria-label={`Arsipkan ${m.full_name}`}
+                                  title="Arsipkan anggota"
+                                  className="rounded p-1.5 text-slate-500 hover:bg-red-50 hover:text-red-700 cursor-pointer"
+                                >
+                                  <Archive className="h-4 w-4" />
+                                </button>
+                              )}
                             </>
                           )}
-                          <button
-                            type="button"
-                            onClick={() => setArchiveTarget(m)}
-                            aria-label={`Arsipkan ${m.full_name}`}
-                            title="Arsipkan anggota"
-                            className="rounded p-1.5 text-slate-500 hover:bg-red-50 hover:text-red-700"
-                          >
-                            <Archive className="h-4 w-4" />
-                          </button>
                         </div>
                       </td>
                     </tr>
@@ -547,7 +647,15 @@ export default function MembersPage() {
               onChange={(e) => setEmail(e.target.value)}
             />
           </div>
-          <TextField label="Alamat" value={address} onChange={(e) => setAddress(e.target.value)} />
+          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+            <TextField label="Alamat" value={address} onChange={(e) => setAddress(e.target.value)} />
+            <TextField
+              label="Masa Berlaku Hingga"
+              type="date"
+              value={expiresAt}
+              onChange={(e) => setExpiresAt(e.target.value)}
+            />
+          </div>
           <div className="flex justify-end gap-2 border-t border-[#E7E4DC] pt-4">
             <Button type="button" variant="secondary" onClick={() => setFormOpen(false)}>
               Batal
@@ -638,6 +746,35 @@ export default function MembersPage() {
       >
         {detailData && (
           <div className="space-y-5 text-xs">
+            <div className="grid grid-cols-2 gap-3 rounded-lg border border-[#E7E4DC] bg-[#F4F3EE]/60 p-3.5 sm:grid-cols-4">
+              <div>
+                <p className="text-[11px] text-slate-500">Nomor Anggota</p>
+                <p className="font-mono font-semibold text-slate-900">{detailData.member.member_code}</p>
+              </div>
+              <div>
+                <p className="text-[11px] text-slate-500">Jenis &amp; Kelas</p>
+                <p className="font-medium text-slate-900">
+                  {detailData.member.membership_type_name}
+                  {detailData.member.unit_or_class ? ` · ${detailData.member.unit_or_class}` : ''}
+                </p>
+              </div>
+              <div>
+                <p className="text-[11px] text-slate-500">Status</p>
+                <div className="mt-0.5">
+                  <StatusIndicator status={detailData.member.status} />
+                </div>
+              </div>
+              <div>
+                <p className="text-[11px] text-slate-500">Berlaku Hingga</p>
+                <p className="font-mono text-slate-900">{detailData.member.expires_at}</p>
+              </div>
+              {detailData.member.block_reason && (
+                <div className="col-span-2 sm:col-span-4 rounded-md border border-[#F2C6C3] bg-[#FDF2F1] px-3 py-2 text-[#9E352F]">
+                  <strong>Alasan Blokir:</strong> {detailData.member.block_reason}
+                </div>
+              )}
+            </div>
+
             <div>
               <h3 className="mb-2 text-sm font-semibold text-slate-900">Riwayat Peminjaman</h3>
               {detailData.loans.length === 0 ? (
@@ -663,6 +800,40 @@ export default function MembersPage() {
                           <td className="px-3 py-2 font-mono">{String(l.due_date)}</td>
                           <td className="px-3 py-2 text-right">
                             <StatusIndicator status={String(l.item_status)} />
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </div>
+
+            <div>
+              <h3 className="mb-2 text-sm font-semibold text-slate-900">Riwayat Pengembalian</h3>
+              {detailData.returns.length === 0 ? (
+                <p className="text-slate-500">Belum ada riwayat pengembalian.</p>
+              ) : (
+                <div className="overflow-x-auto rounded-lg border border-[#E7E4DC]">
+                  <table className="w-full text-left">
+                    <thead className="border-b border-[#E7E4DC] bg-[#F4F3EE] text-slate-500">
+                      <tr>
+                        <th className="px-3 py-2">No. Kembali</th>
+                        <th className="px-3 py-2">Judul Buku</th>
+                        <th className="px-3 py-2">Tanggal</th>
+                        <th className="px-3 py-2">Kondisi</th>
+                        <th className="px-3 py-2 text-right">Status</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-[#EAE7DF]">
+                      {detailData.returns.map((r, idx) => (
+                        <tr key={idx}>
+                          <td className="px-3 py-2 font-mono">{String(r.return_number)}</td>
+                          <td className="px-3 py-2">{String(r.book_title || '-')}</td>
+                          <td className="px-3 py-2 font-mono">{String(r.returned_at)}</td>
+                          <td className="px-3 py-2">{String(r.condition)}</td>
+                          <td className="px-3 py-2 text-right">
+                            <StatusIndicator status={String(r.status)} />
                           </td>
                         </tr>
                       ))}
@@ -712,7 +883,10 @@ export default function MembersPage() {
       {/* Block Member Confirm */}
       <Modal
         open={Boolean(blockTarget)}
-        onClose={() => setBlockTarget(null)}
+        onClose={() => {
+          setBlockTarget(null);
+          setBlockReason('');
+        }}
         title={`Blokir Sementara · ${blockTarget?.full_name}`}
         maxWidth="max-w-md"
       >
@@ -724,11 +898,19 @@ export default function MembersPage() {
             placeholder="Contoh: Menunggak buku lebih dari 14 hari"
           />
           <div className="flex justify-end gap-2">
-            <Button variant="secondary" onClick={() => setBlockTarget(null)}>
+            <Button
+              variant="secondary"
+              disabled={actionBusy}
+              onClick={() => {
+                setBlockTarget(null);
+                setBlockReason('');
+              }}
+            >
               Batal
             </Button>
             <Button
               variant="danger"
+              loading={actionBusy}
               onClick={() =>
                 blockTarget &&
                 handleMemberAction(blockTarget, 'block', { reason: blockReason })
@@ -827,10 +1009,10 @@ export default function MembersPage() {
                 </table>
               </div>
               <div className="flex justify-end gap-2">
-                <Button variant="secondary" onClick={() => setImportOpen(false)}>
+                <Button variant="secondary" disabled={importing} onClick={() => setImportOpen(false)}>
                   Batal
                 </Button>
-                <Button onClick={commitImport} disabled={importPreview.validCount === 0}>
+                <Button onClick={commitImport} loading={importing} disabled={importPreview.validCount === 0}>
                   Konfirmasi Import ({importPreview.validCount} Anggota)
                 </Button>
               </div>
@@ -846,6 +1028,7 @@ export default function MembersPage() {
         title="Arsipkan Anggota"
         message={`Anggota "${archiveTarget?.full_name}" akan diarsipkan (soft delete) sehingga riwayat transaksi tetap terjaga. Lanjutkan?`}
         confirmLabel="Ya, Arsipkan"
+        loading={actionBusy}
       />
     </AppShell>
   );

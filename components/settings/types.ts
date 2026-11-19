@@ -18,6 +18,9 @@ export interface RoleRow {
   slug: string;
   name: string;
   description: string;
+  category?: string;
+  requires_approval?: number;
+  is_system?: number;
   user_count?: number;
   permission_count?: number;
 }
@@ -44,6 +47,12 @@ export interface UserRow {
   role_id: number;
   role_name: string;
   role_slug: string;
+  approval_status?: 'approved' | 'pending' | 'rejected';
+  requested_role_id?: number | null;
+  requested_role_name?: string | null;
+  requested_role_slug?: string | null;
+  approval_note?: string;
+  approved_at?: string | null;
   created_at?: string;
 }
 

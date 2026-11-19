@@ -1,7 +1,10 @@
 import { NextResponse } from 'next/server';
 import { getSessionUser } from '@/lib/auth/session';
 import { getDb, getSettingsMap } from '@/lib/db';
-import { extractLibraryIdentity } from '@/lib/domain/settings-backup-rules';
+import {
+  extractLibraryIdentity,
+  isStaffOperationalPermissions,
+} from '@/lib/domain/settings-backup-rules';
 
 export async function GET() {
   const isFirestoreOnly =
@@ -23,20 +26,20 @@ export async function GET() {
 
     let unreadNotifications = 0;
     if (user) {
-      const row =
-        user.roleSlug === 'anggota'
-          ? (db
-              .prepare(
-                `SELECT COUNT(*) as c FROM notifications
-                 WHERE is_read = 0 AND (user_id = ? OR member_id = ?)`
-              )
-              .get(user.id, user.memberId || -1) as { c: number })
-          : (db
-              .prepare(
-                `SELECT COUNT(*) as c FROM notifications
-                 WHERE is_read = 0 AND (user_id = ? OR (user_id IS NULL AND member_id IS NULL))`
-              )
-              .get(user.id) as { c: number });
+      const isStaff = isStaffOperationalPermissions(user.permissions);
+      const row = !isStaff
+        ? (db
+            .prepare(
+              `SELECT COUNT(*) as c FROM notifications
+               WHERE is_read = 0 AND (user_id = ? OR member_id = ?)`
+            )
+            .get(user.id, user.memberId || -1) as { c: number })
+        : (db
+            .prepare(
+              `SELECT COUNT(*) as c FROM notifications
+               WHERE is_read = 0 AND (user_id = ? OR (user_id IS NULL AND member_id IS NULL))`
+            )
+            .get(user.id) as { c: number });
       unreadNotifications = row.c;
     }
 

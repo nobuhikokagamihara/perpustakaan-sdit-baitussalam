@@ -12,72 +12,11 @@ import {
   buildSeedStudentsForClass,
   getClassPreset,
 } from '@/lib/domain/reading-schedule-rules';
+import { SCHOOL_ROLE_CATALOG } from '@/lib/domain/settings-backup-rules';
 
-export const ROLE_PERMISSION_DEFAULTS: Record<string, string[]> = {
-  super_admin: ['*'],
-  kepala_perpustakaan: [
-    'dashboard.view',
-    'books.read',
-    'books.write',
-    'books.archive',
-    'books.import_export',
-    'members.read',
-    'members.write',
-    'members.block',
-    'loans.read',
-    'loans.write',
-    'returns.write',
-    'reservations.read',
-    'reservations.write',
-    'fines.read',
-    'fines.pay',
-    'fines.waive',
-    'inventory.read',
-    'inventory.write',
-    'acquisitions.read',
-    'acquisitions.write',
-    'acquisitions.approve',
-    'reports.read',
-    'notifications.read',
-    'settings.read',
-    'audit.read',
-    'schedules.read',
-    'schedules.write',
-  ],
-  pustakawan: [
-    'dashboard.view',
-    'books.read',
-    'books.write',
-    'books.import_export',
-    'members.read',
-    'members.write',
-    'members.block',
-    'loans.read',
-    'loans.write',
-    'returns.write',
-    'reservations.read',
-    'reservations.write',
-    'fines.read',
-    'fines.pay',
-    'inventory.read',
-    'inventory.write',
-    'acquisitions.read',
-    'acquisitions.write',
-    'reports.read',
-    'notifications.read',
-    'schedules.read',
-    'schedules.write',
-  ],
-  anggota: [
-    'books.read',
-    'loans.read',
-    'reservations.read',
-    'reservations.write',
-    'fines.read',
-    'notifications.read',
-    'schedules.read',
-  ],
-};
+export const ROLE_PERMISSION_DEFAULTS: Record<string, string[]> = Object.fromEntries(
+  SCHOOL_ROLE_CATALOG.map((r) => [r.slug, r.permissions])
+);
 
 export function classNameToDocId(className: string): string {
   const short = className.replace(/^Kelas\s+/i, '').trim().toLowerCase().replace(/[^a-z0-9]/g, '');

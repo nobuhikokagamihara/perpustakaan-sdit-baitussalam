@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { getDb, getSettingsMap } from '@/lib/db';
 import { requirePermission } from '@/lib/auth/session';
 import { logAudit } from '@/lib/db/audit';
-import { validatePaymentAmount } from '@/lib/domain/library-rules';
+import { hasPermission, validatePaymentAmount } from '@/lib/domain/library-rules';
 import { extractCirculationPolicy } from '@/lib/domain/settings-backup-rules';
 
 export async function GET() {
@@ -11,10 +11,16 @@ export async function GET() {
 
   const db = getDb();
   const policy = extractCirculationPolicy(getSettingsMap(db));
+  const canViewAllFines =
+    hasPermission(guard.user.permissions, 'fines.pay') ||
+    hasPermission(guard.user.permissions, 'fines.waive') ||
+    hasPermission(guard.user.permissions, 'members.read') ||
+    hasPermission(guard.user.permissions, 'dashboard.view');
+
   let where = 'WHERE 1=1';
   const params: number[] = [];
 
-  if (guard.user.roleSlug === 'anggota') {
+  if (!canViewAllFines) {
     if (!guard.user.memberId) {
       return NextResponse.json({
         fines: [],
@@ -44,7 +50,7 @@ export async function GET() {
        JOIN fines f ON f.id = p.fine_id
        JOIN members m ON m.id = p.member_id
        LEFT JOIN users u ON u.id = p.received_by_user_id
-       ${guard.user.roleSlug === 'anggota' ? 'WHERE p.member_id = ?' : ''}
+       ${!canViewAllFines ? 'WHERE p.member_id = ?' : ''}
        ORDER BY p.id DESC
        LIMIT 100`
     )

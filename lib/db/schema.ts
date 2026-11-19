@@ -597,6 +597,22 @@ export const MIGRATIONS: Migration[] = [
         ('backup_include_audit_logs', 'false');
     `,
   },
+  {
+    id: '006_school_roles_and_signup_approval',
+    up: `
+      ALTER TABLE roles ADD COLUMN category TEXT NOT NULL DEFAULT 'Kustom';
+      ALTER TABLE roles ADD COLUMN requires_approval INTEGER NOT NULL DEFAULT 0;
+      ALTER TABLE roles ADD COLUMN is_system INTEGER NOT NULL DEFAULT 0;
+
+      ALTER TABLE users ADD COLUMN approval_status TEXT NOT NULL DEFAULT 'approved';
+      ALTER TABLE users ADD COLUMN requested_role_id INTEGER REFERENCES roles(id) ON DELETE SET NULL;
+      ALTER TABLE users ADD COLUMN approval_note TEXT NOT NULL DEFAULT '';
+      ALTER TABLE users ADD COLUMN approved_by_user_id INTEGER REFERENCES users(id) ON DELETE SET NULL;
+      ALTER TABLE users ADD COLUMN approved_at TEXT;
+
+      CREATE INDEX IF NOT EXISTS idx_users_approval_status ON users(approval_status);
+    `,
+  },
 ];
 
 export function runMigrations(db: Database.Database): void {

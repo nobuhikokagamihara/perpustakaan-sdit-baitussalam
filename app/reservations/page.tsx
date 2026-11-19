@@ -135,7 +135,7 @@ export default function ReservationsPage() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           bookId: Number(bookId),
-          memberId: user?.roleSlug === 'anggota' ? user.memberId : Number(memberId),
+          memberId: !can('members.read') ? user?.memberId : Number(memberId),
           notes,
         }),
       });

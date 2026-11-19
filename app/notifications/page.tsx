@@ -29,7 +29,7 @@ export default function NotificationsPage() {
   const { user, loading: authLoading, can, refreshSession } = useAuth();
   const { showToast } = useToast();
   const canReadNotifications = can('notifications.read');
-  const isStaff = Boolean(user && user.roleSlug !== 'anggota');
+  const isStaff = Boolean(user && can('dashboard.view'));
   const [notifications, setNotifications] = useState<NotifRow[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);

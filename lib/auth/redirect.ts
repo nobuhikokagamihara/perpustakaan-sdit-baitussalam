@@ -1,3 +1,5 @@
+import { MEMBER_ONLY_DEFAULT_ROUTE_SLUGS } from '@/lib/domain/settings-backup-rules';
+
 export function sanitizeRedirectPath(
   nextPath: string | null | undefined,
   fallback = '/'
@@ -14,7 +16,7 @@ export function sanitizeRedirectPath(
 }
 
 export function getDefaultRouteForRole(roleSlug: string): string {
-  return roleSlug === 'anggota' ? '/catalog' : '/';
+  return MEMBER_ONLY_DEFAULT_ROUTE_SLUGS.has(roleSlug) ? '/catalog' : '/';
 }
 
 export function buildLoginHref(nextPath?: string | null): string {

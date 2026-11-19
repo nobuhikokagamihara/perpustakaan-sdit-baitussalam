@@ -3,7 +3,12 @@ import os from 'node:os';
 import path from 'node:path';
 import Database from 'better-sqlite3';
 import { runMigrations } from './schema';
-import { seedDatabase, seedReadingSchedules, seedClassRostersAndAttendance } from './seed';
+import {
+  seedDatabase,
+  seedReadingSchedules,
+  seedClassRostersAndAttendance,
+  seedSchoolRoles,
+} from './seed';
 
 declare global {
   var _libraryDb: Database.Database | undefined;
@@ -35,6 +40,7 @@ export function getDb(): Database.Database {
 
     runMigrations(db);
     seedDatabase(db);
+    seedSchoolRoles(db);
     seedReadingSchedules(db);
     seedClassRostersAndAttendance(db);
 

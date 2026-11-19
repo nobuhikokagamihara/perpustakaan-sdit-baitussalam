@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { getDb, getSettingsMap } from '@/lib/db';
 import { requirePermission } from '@/lib/auth/session';
 import { logAudit } from '@/lib/db/audit';
-import { addDaysIso, formatIsoDate } from '@/lib/domain/library-rules';
+import { addDaysIso, formatIsoDate, hasPermission } from '@/lib/domain/library-rules';
 import { extractCirculationPolicy } from '@/lib/domain/settings-backup-rules';
 
 export async function GET() {
@@ -30,9 +30,13 @@ export async function GET() {
     }
   })();
 
+  const canManageAllReservations =
+    hasPermission(guard.user.permissions, 'loans.write') ||
+    hasPermission(guard.user.permissions, 'members.read');
+
   let where = 'WHERE 1=1';
   const params: Array<number> = [];
-  if (guard.user.roleSlug === 'anggota') {
+  if (!canManageAllReservations) {
     if (!guard.user.memberId) return NextResponse.json({ reservations: [] });
     where += ' AND r.member_id = ?';
     params.push(guard.user.memberId);
@@ -62,8 +66,11 @@ export async function POST(req: NextRequest) {
   try {
     const body = await req.json();
     const bookId = Number(body.bookId);
+    const canReserveForOthers =
+      hasPermission(guard.user.permissions, 'loans.write') ||
+      hasPermission(guard.user.permissions, 'members.read');
     const memberId =
-      guard.user.roleSlug === 'anggota' && guard.user.memberId
+      !canReserveForOthers && guard.user.memberId
         ? guard.user.memberId
         : Number(body.memberId);
     const notes = String(body.notes || '');
@@ -176,7 +183,7 @@ export async function PATCH(req: NextRequest) {
     );
   }
 
-  if (guard.user.roleSlug === 'anggota' && existing.member_id !== guard.user.memberId) {
+  if (!isStaffCirculation && existing.member_id !== guard.user.memberId) {
     return NextResponse.json({ error: 'Tidak berhak mengubah reservasi anggota lain.' }, { status: 403 });
   }
 

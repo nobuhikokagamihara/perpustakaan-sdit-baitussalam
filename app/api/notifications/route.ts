@@ -2,17 +2,21 @@ import { NextRequest, NextResponse } from 'next/server';
 import { getDb, getSettingsMap } from '@/lib/db';
 import { requirePermission } from '@/lib/auth/session';
 import { addDaysIso, formatIsoDate } from '@/lib/domain/library-rules';
-import { extractCirculationPolicy } from '@/lib/domain/settings-backup-rules';
+import {
+  extractCirculationPolicy,
+  isStaffOperationalPermissions,
+} from '@/lib/domain/settings-backup-rules';
 
 export async function GET() {
   const guard = await requirePermission('notifications.read');
   if (guard.errorResponse) return guard.errorResponse;
 
   const db = getDb();
+  const isStaff = isStaffOperationalPermissions(guard.user.permissions);
   let where = 'WHERE 1=1';
   const params: number[] = [];
 
-  if (guard.user.roleSlug === 'anggota') {
+  if (!isStaff) {
     where += ' AND (user_id = ? OR member_id = ?)';
     params.push(guard.user.id, guard.user.memberId || -1);
   } else {
@@ -33,9 +37,10 @@ export async function PATCH(req: NextRequest) {
 
   const body = await req.json();
   const db = getDb();
+  const isStaff = isStaffOperationalPermissions(guard.user.permissions);
 
   if (body.action === 'mark_all_read') {
-    if (guard.user.roleSlug === 'anggota') {
+    if (!isStaff) {
       db.prepare('UPDATE notifications SET is_read = 1 WHERE user_id = ? OR member_id = ?').run(
         guard.user.id,
         guard.user.memberId || -1
@@ -49,7 +54,7 @@ export async function PATCH(req: NextRequest) {
   }
 
   if (body.action === 'scan_alerts') {
-    if (guard.user.roleSlug === 'anggota') {
+    if (!isStaff) {
       return NextResponse.json(
         { error: 'Hanya petugas yang dapat memindai pengingat sistem.' },
         { status: 403 }
@@ -115,7 +120,7 @@ export async function PATCH(req: NextRequest) {
 
   if (body.id) {
     const notifId = Number(body.id);
-    if (guard.user.roleSlug === 'anggota') {
+    if (!isStaff) {
       db.prepare('UPDATE notifications SET is_read = 1 WHERE id = ? AND (user_id = ? OR member_id = ?)').run(
         notifId,
         guard.user.id,

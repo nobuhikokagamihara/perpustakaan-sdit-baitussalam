@@ -31,7 +31,7 @@ export async function POST(req: NextRequest) {
     const db = getDb();
     const user = db
       .prepare(
-        `SELECT u.id, u.username, u.email, u.full_name, u.password_hash, u.is_active, u.member_id,
+        `SELECT u.id, u.username, u.email, u.full_name, u.password_hash, u.is_active, u.approval_status, u.approval_note, u.member_id,
                 r.slug as role_slug, r.name as role_name, r.id as role_id
          FROM users u
          JOIN roles r ON r.id = u.role_id
@@ -45,6 +45,8 @@ export async function POST(req: NextRequest) {
           full_name: string;
           password_hash: string;
           is_active: number;
+          approval_status: string;
+          approval_note: string;
           member_id: number | null;
           role_slug: string;
           role_name: string;
@@ -56,6 +58,26 @@ export async function POST(req: NextRequest) {
       return NextResponse.json(
         { error: 'Email/username atau kata sandi tidak valid.' },
         { status: 401 }
+      );
+    }
+
+    if (user.approval_status === 'pending') {
+      return NextResponse.json(
+        {
+          error: `Akun Anda sedang menunggu persetujuan Super Admin untuk peran "${user.role_name}". Silakan hubungi Super Admin sekolah.`,
+        },
+        { status: 403 }
+      );
+    }
+
+    if (user.approval_status === 'rejected') {
+      return NextResponse.json(
+        {
+          error: user.approval_note
+            ? `Pendaftaran akun Anda ditolak oleh Super Admin: ${user.approval_note}`
+            : 'Pendaftaran akun Anda ditolak oleh Super Admin.',
+        },
+        { status: 403 }
       );
     }
 
