@@ -54,14 +54,18 @@ import {
 } from '@/lib/domain/library-rules';
 import {
   ALL_BACKUP_TABLES,
+  ALL_STANDARD_PERMISSIONS,
   BACKUP_MODULES,
   DEFAULT_SYSTEM_SETTINGS,
+  SCHOOL_ROLE_CATALOG,
+  SCHOOL_ROLE_MAP,
   SYSTEM_ROLE_SLUGS,
   buildBackupEnvelope,
   computeRestoreDiff,
   evaluateBackupHealth,
   extractCirculationPolicy,
   guardSuperAdminLockout,
+  isStaffOperationalPermissions,
   normalizeSelectedModules,
   parseNumberSetting,
   validateBackupEnvelope,
@@ -210,7 +214,17 @@ function jsonRes(data: unknown, status = 200): Response {
 }
 
 function isStaffRole(roleSlug: string) {
-  return ['super_admin', 'kepala_perpustakaan', 'pustakawan'].includes(roleSlug);
+  return [
+    'super_admin',
+    'kepala_sekolah',
+    'wakil_kepala_sekolah',
+    'kepala_perpustakaan',
+    'admin_perpus',
+    'pustakawan',
+    'staff_tu',
+    'bendahara_sekolah',
+    'operator_it',
+  ].includes(roleSlug);
 }
 
 async function writeAuditLog(
@@ -448,7 +462,7 @@ async function dispatchFirestoreApiInner(
   const pathname = url.pathname;
   const searchParams = url.searchParams;
   const db = getFirestoreClient();
-  const isStaff = isStaffRole(actor.roleSlug);
+  const isStaff = isStaffRole(actor.roleSlug) || isStaffOperationalPermissions(actor.permissions);
   const todayStr = formatIsoDate(new Date());
 
   // Seed Firestore automatically on first staff login if needed
@@ -1255,11 +1269,15 @@ async function dispatchFirestoreApiInner(
 
   // 4. /api/members, /api/members/import, /api/members/[id]
   if (pathname === '/api/members' && method === 'GET') {
-    if (!isStaff) return jsonRes({ error: 'Akses ditolak.' }, 403);
+    if (!isStaff && !actor.permissions.includes('members.read')) {
+      return jsonRes({ error: 'Akses ditolak.' }, 403);
+    }
     const q = (searchParams.get('q') || '').trim().toLowerCase();
     const statusFilter = searchParams.get('status') || '';
+    const typeIdFilter = searchParams.get('typeId') || '';
+    const archivedMode = searchParams.get('archived') || 'exclude';
     const [members, mTypes, loans, fines] = await Promise.all([
-      listCollection('members', [where('archived', '==', false)]),
+      listCollection('members', [where('archived', '==', archivedMode === 'only')]),
       listCollection('membership_types'),
       listCollection('loans'),
       listCollection('fines'),
@@ -1307,6 +1325,7 @@ async function dispatchFirestoreApiInner(
       })
       .filter((m) => {
         if (statusFilter && m.status !== statusFilter) return false;
+        if (typeIdFilter && String(m.membership_type_id) !== typeIdFilter) return false;
         if (!q) return true;
         return (
           m.member_code.toLowerCase().includes(q) ||
@@ -1485,12 +1504,18 @@ async function dispatchFirestoreApiInner(
           member_code: member.memberCode,
           full_name: member.fullName,
           membership_type_name: member.membershipTypeName,
+          unit_or_class: member.unitOrClass || '',
+          identity_number: member.identityNumber || '',
+          phone: member.phone || '',
+          email: member.email || '',
           status: member.status,
+          block_reason: member.blockReason || '',
           expires_at: member.expiresAt,
         },
         loans: flatLoans,
         returns: returns.map((r) => ({
           return_number: r.returnNumber,
+          book_title: r.bookTitle || '',
           returned_at: r.returnedAt,
           condition: r.condition,
           status: r.status,
@@ -1564,6 +1589,21 @@ async function dispatchFirestoreApiInner(
         return jsonRes({ ok: true });
       }
 
+      if (action === 'restore') {
+        try {
+          await updateDoc(doc(db, 'members', memberDocId), {
+            status: 'Aktif',
+            blockReason: '',
+            archived: false,
+            updatedAt: serverTimestamp(),
+          });
+          await writeAuditLog(actor, 'MEMBER_RESTORE', 'members', memberDocId, `Pulihkan anggota: ${member.fullName}`);
+        } catch (err) {
+          handleFirestoreError(err, OperationType.UPDATE, `members/${memberDocId}`);
+        }
+        return jsonRes({ ok: true, status: 'Aktif' });
+      }
+
       const fullName = clampString(body?.fullName, 120);
       if (!fullName) return jsonRes({ error: 'Nama lengkap wajib diisi.' }, 400);
       const mTypes = await listCollection('membership_types');
@@ -1581,6 +1621,7 @@ async function dispatchFirestoreApiInner(
           address: clampString(body?.address, 300, ''),
           phone: clampString(body?.phone, 40, ''),
           email: clampString(body?.email, 160, ''),
+          expiresAt: body?.expiresAt ? clampString(body.expiresAt, 32, String(member.expiresAt)) : String(member.expiresAt),
           updatedAt: serverTimestamp(),
         });
         await writeAuditLog(actor, 'MEMBER_UPDATE', 'members', memberDocId, `Edit anggota: ${fullName}`);
@@ -2198,7 +2239,7 @@ async function dispatchFirestoreApiInner(
     const bookIdParam = String(body?.bookId || '');
     const bookDocId = bookIdParam.startsWith('book_') ? bookIdParam : `book_${bookIdParam}`;
     const memberIdParam =
-      actor.roleSlug === 'anggota' && actor.memberDocId
+      !isStaff && actor.memberDocId
         ? actor.memberDocId
         : String(body?.memberId || '1');
     const memberDocId = memberIdParam.startsWith('member_') ? memberIdParam : `member_${memberIdParam}`;
@@ -2241,7 +2282,7 @@ async function dispatchFirestoreApiInner(
         memberId: memberDocId,
         memberCode: clampString(mem.memberCode, 64),
         memberName: clampString(mem.fullName, 120),
-        ownerUid: clampString(mem.ownerUid || (actor.roleSlug === 'anggota' ? actor.uid : ''), 128, ''),
+        ownerUid: clampString(mem.ownerUid || (!isStaff ? actor.uid : ''), 128, ''),
         queuePosition,
         status: 'Menunggu',
         reservedAt: new Date().toISOString().replace('T', ' ').slice(0, 19),
@@ -3368,25 +3409,32 @@ async function dispatchFirestoreApiInner(
           : Promise.resolve([]),
       ]);
 
-    const baseRoles = [
-      { id: 1, slug: 'super_admin', name: 'Super Admin', description: 'Akses penuh sistem, RBAC & backup' },
-      { id: 2, slug: 'kepala_perpustakaan', name: 'Kepala Perpustakaan', description: 'Persetujuan pengadaan, waive denda & laporan' },
-      { id: 3, slug: 'pustakawan', name: 'Pustakawan / Petugas', description: 'Operasional sirkulasi, katalog & jadwal baca' },
-      { id: 4, slug: 'anggota', name: 'Siswa / Guru', description: 'OPAC & pinjaman pribadi' },
-    ];
+    const baseRoles = SCHOOL_ROLE_CATALOG.map((r, idx) => ({
+      id: idx + 1,
+      slug: r.slug,
+      name: r.name,
+      description: r.description,
+      category: r.category,
+      requires_approval: r.requiresApproval ? 1 : 0,
+      is_system: 1,
+    }));
     const customRolesMap =
-      (rbacSet?.customRoles as Record<string, { id?: number; name: string; description?: string }>) || {};
+      (rbacSet?.customRoles as Record<
+        string,
+        { id?: number; name: string; description?: string; category?: string; requiresApproval?: boolean }
+      >) || {};
     const customRoles = Object.entries(customRolesMap).map(([slug, meta], idx) => ({
-      id: Number(meta.id || 5 + idx),
+      id: Number(meta.id || baseRoles.length + 1 + idx),
       slug,
       name: String(meta.name || slug),
       description: String(meta.description || ''),
+      category: String(meta.category || 'Kustom'),
+      requires_approval: meta.requiresApproval ? 1 : 0,
+      is_system: 0,
     }));
     const allRoles = [...baseRoles, ...customRoles];
 
-    const permCodes = Array.from(
-      new Set(Object.values(ROLE_PERMISSION_DEFAULTS).flat().filter((p) => p !== '*'))
-    );
+    const permCodes = ALL_STANDARD_PERMISSIONS;
     const permissions = permCodes.map((code, i) => ({
       id: i + 1,
       code,
@@ -3397,7 +3445,7 @@ async function dispatchFirestoreApiInner(
     const rpMatrix = (rbacSet?.rolePermissions as Record<string, string[]>) || ROLE_PERMISSION_DEFAULTS;
     const rolePermissions: Array<{ role_id: number; permission_id: number }> = [];
     for (const r of allRoles) {
-      const granted = rpMatrix[r.slug] || [];
+      const granted = rpMatrix[r.slug] || SCHOOL_ROLE_MAP.get(r.slug)?.permissions || [];
       for (const p of permissions) {
         if (granted.includes('*') || granted.includes(p.code)) {
           rolePermissions.push({ role_id: r.id, permission_id: p.id });
@@ -3451,18 +3499,25 @@ async function dispatchFirestoreApiInner(
       roles,
       permissions,
       rolePermissions,
-      users: users.map((u, i) => ({
-        id: i + 1,
-        uid: u.id,
-        username: String(u.email).split('@')[0],
-        email: String(u.email),
-        full_name: String(u.fullName),
-        is_active: u.isActive ? 1 : 0,
-        role_id: roles.find((r) => r.slug === u.role)?.id || 4,
-        role_name: roles.find((r) => r.slug === u.role)?.name || String(u.role),
-        role_slug: String(u.role),
-        created_at: tsToIso(u.createdAt),
-      })),
+      users: users.map((u, i) => {
+        const reqSlug = u.requestedRole ? String(u.requestedRole) : null;
+        const reqRole = reqSlug ? roles.find((r) => r.slug === reqSlug) : undefined;
+        return {
+          id: i + 1,
+          uid: u.id,
+          username: String(u.email).split('@')[0],
+          email: String(u.email),
+          full_name: String(u.fullName),
+          is_active: u.isActive ? 1 : 0,
+          role_id: roles.find((r) => r.slug === u.role)?.id || 4,
+          role_name: roles.find((r) => r.slug === u.role)?.name || String(u.role),
+          role_slug: String(u.role),
+          approval_status: (u.approvalStatus as 'approved' | 'pending' | 'rejected') || 'approved',
+          requested_role_slug: reqSlug,
+          requested_role_name: reqRole?.name || reqSlug,
+          created_at: tsToIso(u.createdAt),
+        };
+      }),
       staffRoles: staffRoles.map((sr) => ({
         uid: sr.id,
         email: String(sr.email),
@@ -3647,6 +3702,8 @@ async function dispatchFirestoreApiInner(
     if (section === 'create_role') {
       const name = clampString(body?.name, 60);
       const description = clampString(body?.description, 240);
+      const category = clampString(body?.category, 60, 'Kustom');
+      const requiresApproval = Boolean(body?.requiresApproval);
       const check = validateCustomRoleInput({
         slug: typeof body?.slug === 'string' ? body.slug : undefined,
         name,
@@ -3657,20 +3714,24 @@ async function dispatchFirestoreApiInner(
       }
       const rbacDoc = await getDocument('library_settings', 'rbac');
       const customRoles = {
-        ...((rbacDoc?.customRoles as Record<string, { id: number; name: string; description: string }>) || {}),
+        ...((rbacDoc?.customRoles as Record<
+          string,
+          { id: number; name: string; description: string; category?: string; requiresApproval?: boolean }
+        >) || {}),
       };
       if (customRoles[check.normalizedSlug]) {
         return jsonRes({ error: `Peran '${check.normalizedSlug}' sudah ada.` }, 409);
       }
+      const baseCount = SCHOOL_ROLE_CATALOG.length;
       const nextId =
-        Object.values(customRoles).reduce((m, r) => Math.max(m, Number(r.id || 4)), 4) + 1;
-      customRoles[check.normalizedSlug] = { id: nextId, name, description };
+        Object.values(customRoles).reduce((m, r) => Math.max(m, Number(r.id || baseCount)), baseCount) + 1;
+      customRoles[check.normalizedSlug] = { id: nextId, name, description, category, requiresApproval };
 
       const matrix = {
         ...((rbacDoc?.rolePermissions as Record<string, string[]>) || ROLE_PERMISSION_DEFAULTS),
       };
       const cloneFromRoleId = body?.cloneFromRoleId ? Number(body.cloneFromRoleId) : null;
-      const baseSlugs = ['super_admin', 'kepala_perpustakaan', 'pustakawan', 'anggota'];
+      const baseSlugs = SCHOOL_ROLE_CATALOG.map((r) => r.slug);
       let cloned: string[] = [];
       if (cloneFromRoleId) {
         const srcSlug =
@@ -3696,17 +3757,22 @@ async function dispatchFirestoreApiInner(
       const slug = clampString(body?.slug, 64);
       const name = clampString(body?.name, 60);
       const description = clampString(body?.description, 240);
+      const category = clampString(body?.category, 60, 'Kustom');
+      const requiresApproval = Boolean(body?.requiresApproval);
       if (!slug || name.length < 3) {
         return jsonRes({ error: 'Nama peran minimal 3 karakter.' }, 400);
       }
       const rbacDoc = await getDocument('library_settings', 'rbac');
       const customRoles = {
-        ...((rbacDoc?.customRoles as Record<string, { id: number; name: string; description: string }>) || {}),
+        ...((rbacDoc?.customRoles as Record<
+          string,
+          { id: number; name: string; description: string; category?: string; requiresApproval?: boolean }
+        >) || {}),
       };
       if (!customRoles[slug]) {
-        return jsonRes({ error: 'Hanya peran kustom yang deskripsinya dapat diubah di mode Cloud.' }, 400);
+        return jsonRes({ error: 'Hanya peran kustom yang metadata-nya dapat diubah di mode Cloud.' }, 400);
       }
-      customRoles[slug] = { ...customRoles[slug], name, description };
+      customRoles[slug] = { ...customRoles[slug], name, description, category, requiresApproval };
       await updateDoc(doc(db, 'library_settings', 'rbac'), {
         customRoles,
         updatedByUid: actor.uid,
@@ -3723,7 +3789,7 @@ async function dispatchFirestoreApiInner(
       }
       const rbacDoc = await getDocument('library_settings', 'rbac');
       const customRoles = {
-        ...((rbacDoc?.customRoles as Record<string, { id: number; name: string; description: string }>) || {}),
+        ...((rbacDoc?.customRoles as Record<string, { id: number; name: string }>) || {}),
       };
       const matrix = {
         ...((rbacDoc?.rolePermissions as Record<string, string[]>) || ROLE_PERMISSION_DEFAULTS),
@@ -3743,13 +3809,11 @@ async function dispatchFirestoreApiInner(
     if (section === 'role_permissions') {
       const roleId = Number(body?.roleId || 3);
       const permIds = (body?.permissionIds as number[]) || [];
-      const permCodes = Array.from(
-        new Set(Object.values(ROLE_PERMISSION_DEFAULTS).flat().filter((p) => p !== '*'))
-      );
+      const permCodes = ALL_STANDARD_PERMISSIONS;
       const rbacDoc = await getDocument('library_settings', 'rbac');
       const customRoles =
         (rbacDoc?.customRoles as Record<string, { id: number; name: string }>) || {};
-      const baseSlugs = ['super_admin', 'kepala_perpustakaan', 'pustakawan', 'anggota'];
+      const baseSlugs = SCHOOL_ROLE_CATALOG.map((r) => r.slug);
       const slug =
         (typeof body?.roleSlug === 'string' && body.roleSlug) ||
         baseSlugs[roleId - 1] ||
@@ -3772,6 +3836,88 @@ async function dispatchFirestoreApiInner(
         updatedAt: serverTimestamp(),
       });
       await writeAuditLog(actor, 'RBAC_UPDATE', 'role', slug, `Perbarui ${selectedCodes.length} izin untuk ${slug}`);
+      return jsonRes({ ok: true });
+    }
+
+    if (section === 'update_user' || section === 'change_user_role' || section === 'approve_user' || section === 'reject_user') {
+      if (actor.roleSlug !== 'super_admin' && !actor.permissions.includes('*')) {
+        return jsonRes({ error: 'Hanya Super Admin yang dapat mengelola peran dan persetujuan akun.' }, 403);
+      }
+      const targetUid = sanitizeDocId(String(body?.uid || ''));
+      if (!targetUid) return jsonRes({ error: 'UID pengguna Google wajib diisi.' }, 400);
+      const targetUser = await getDocument('users', targetUid);
+      if (!targetUser) return jsonRes({ error: 'Akun pengguna tidak ditemukan.' }, 404);
+
+      if (section === 'reject_user') {
+        if (targetUid === actor.uid) {
+          return jsonRes({ error: 'Tidak dapat menolak akun sendiri.' }, 400);
+        }
+        await updateDoc(doc(db, 'users', targetUid), {
+          approvalStatus: 'rejected',
+          isActive: false,
+          updatedAt: serverTimestamp(),
+        });
+        await writeAuditLog(actor, 'USER_REJECT', 'users', targetUid, `Tolak pendaftaran ${String(targetUser.email)}`);
+        return jsonRes({ ok: true });
+      }
+
+      const rbacDoc = await getDocument('library_settings', 'rbac');
+      const customRoles = (rbacDoc?.customRoles as Record<string, { id: number; name: string }>) || {};
+      const baseSlugs = SCHOOL_ROLE_CATALOG.map((r) => r.slug);
+      const roleIdNum = Number(body?.roleId || 0);
+      const nextRoleSlug =
+        (typeof body?.roleSlug === 'string' && body.roleSlug.trim()) ||
+        (roleIdNum > 0
+          ? baseSlugs[roleIdNum - 1] || Object.entries(customRoles).find(([, v]) => v.id === roleIdNum)?.[0]
+          : '') ||
+        String(targetUser.requestedRole || targetUser.role || 'anggota');
+
+      if (targetUid === actor.uid && actor.roleSlug === 'super_admin' && nextRoleSlug !== 'super_admin') {
+        return jsonRes({ error: 'Tidak dapat menurunkan peran Super Admin akun sendiri.' }, 400);
+      }
+
+      const nextFullName =
+        section === 'update_user' && body?.fullName ? clampString(body.fullName, 120) : String(targetUser.fullName);
+      const nextEmail =
+        section === 'update_user' && body?.email ? clampString(body.email, 160) : String(targetUser.email);
+
+      await updateDoc(doc(db, 'users', targetUid), {
+        fullName: nextFullName,
+        email: nextEmail,
+        role: nextRoleSlug,
+        approvalStatus: 'approved',
+        isActive: true,
+        updatedAt: serverTimestamp(),
+      });
+
+      const existingStaffRole = await getDocument('staff_roles', targetUid);
+      if (nextRoleSlug === 'anggota' || nextRoleSlug === 'pengunjung') {
+        if (existingStaffRole) {
+          await deleteDoc(doc(db, 'staff_roles', targetUid));
+        }
+      } else if (existingStaffRole) {
+        await updateDoc(doc(db, 'staff_roles', targetUid), {
+          email: nextEmail,
+          fullName: nextFullName,
+          role: nextRoleSlug,
+          isActive: true,
+          assignedByUid: actor.uid,
+          updatedAt: serverTimestamp(),
+        });
+      } else {
+        await setDoc(doc(db, 'staff_roles', targetUid), {
+          uid: targetUid,
+          email: nextEmail,
+          fullName: nextFullName,
+          role: nextRoleSlug,
+          isActive: true,
+          assignedByUid: actor.uid,
+          createdAt: serverTimestamp(),
+          updatedAt: serverTimestamp(),
+        });
+      }
+
+      await writeAuditLog(actor, section === 'approve_user' ? 'USER_APPROVE' : 'USER_ROLE_CHANGE', 'users', targetUid, `${nextEmail} -> ${nextRoleSlug}`);
       return jsonRes({ ok: true });
     }
 

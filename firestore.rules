@@ -50,15 +50,33 @@ service cloud.firestore {
     }
 
     function isKepala() {
-      return isAdmin() || (hasStaffDoc() && staffRole().isActive == true && staffRole().role == 'kepala_perpustakaan');
+      return isAdmin() || (
+        hasStaffDoc()
+        && staffRole().isActive == true
+        && staffRole().role in ['kepala_perpustakaan', 'kepala_sekolah', 'wakil_kepala_sekolah', 'admin_perpus']
+      );
     }
 
     function isStaff() {
       return isAdmin() || (
         hasStaffDoc()
         && staffRole().isActive == true
-        && staffRole().role in ['super_admin', 'kepala_perpustakaan', 'pustakawan']
+        && staffRole().role in [
+          'super_admin',
+          'kepala_sekolah',
+          'wakil_kepala_sekolah',
+          'kepala_perpustakaan',
+          'admin_perpus',
+          'pustakawan',
+          'staff_tu',
+          'bendahara_sekolah',
+          'operator_it'
+        ]
       );
+    }
+
+    function isValidRoleSlug(val) {
+      return val is string && val.size() >= 2 && val.size() <= 64 && val.matches('^[a-z][a-z0-9_]*$');
     }
 
     function isNonEmptyString(val, maxLen) {
@@ -77,7 +95,7 @@ service cloud.firestore {
         && isValidId(data.uid)
         && isNonEmptyString(data.email, 160)
         && isNonEmptyString(data.fullName, 120)
-        && data.role in ['super_admin', 'kepala_perpustakaan', 'pustakawan', 'anggota']
+        && isValidRoleSlug(data.role)
         && data.isActive is bool
         && isValidId(data.assignedByUid)
         && data.createdAt is timestamp
@@ -86,11 +104,13 @@ service cloud.firestore {
 
     function isValidUserProfile(data) {
       return data.keys().hasAll(['uid', 'email', 'fullName', 'role', 'isActive', 'createdAt', 'updatedAt'])
-        && data.keys().hasOnly(['uid', 'email', 'fullName', 'role', 'memberId', 'memberCode', 'isActive', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly(['uid', 'email', 'fullName', 'role', 'requestedRole', 'approvalStatus', 'memberId', 'memberCode', 'isActive', 'createdAt', 'updatedAt'])
         && isValidId(data.uid)
         && isNonEmptyString(data.email, 160)
         && isNonEmptyString(data.fullName, 120)
-        && data.role in ['super_admin', 'kepala_perpustakaan', 'pustakawan', 'anggota']
+        && isValidRoleSlug(data.role)
+        && (!('requestedRole' in data) || isOptionalString(data.requestedRole, 64))
+        && (!('approvalStatus' in data) || data.approvalStatus in ['approved', 'pending', 'rejected'])
         && (!('memberId' in data) || isOptionalString(data.memberId, 128))
         && (!('memberCode' in data) || isOptionalString(data.memberCode, 64))
         && data.isActive is bool
@@ -514,7 +534,7 @@ service cloud.firestore {
         ])
         && data.numericId is number && data.numericId >= 1
         && (!('targetUid' in data) || isOptionalString(data.targetUid, 128))
-        && data.targetRole in ['all_staff', 'kepala_perpustakaan', 'pustakawan', 'anggota', 'super_admin']
+        && isValidRoleSlug(data.targetRole)
         && (!('memberId' in data) || isOptionalString(data.memberId, 128))
         && data.type in ['info', 'warning', 'danger', 'success']
         && isNonEmptyString(data.title, 160)
@@ -689,7 +709,7 @@ service cloud.firestore {
         && incoming().createdAt == existing().createdAt
         && incoming().updatedAt == request.time
         && (
-          (isAdmin() && incoming().diff(existing()).affectedKeys().hasOnly(['fullName', 'email', 'role', 'memberId', 'memberCode', 'isActive', 'updatedAt']))
+          (isAdmin() && incoming().diff(existing()).affectedKeys().hasOnly(['fullName', 'email', 'role', 'requestedRole', 'approvalStatus', 'memberId', 'memberCode', 'isActive', 'updatedAt']))
           || (isOwner(uid) && incoming().role == existing().role && incoming().isActive == existing().isActive && incoming().diff(existing()).affectedKeys().hasOnly(['fullName', 'memberId', 'memberCode', 'updatedAt']))
         );
       allow delete: if false;

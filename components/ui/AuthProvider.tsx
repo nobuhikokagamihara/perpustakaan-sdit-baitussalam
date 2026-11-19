@@ -36,6 +36,9 @@ import {
 } from '@/lib/client/data-gateway';
 import { addDaysIso, formatIsoDate } from '@/lib/domain/library-rules';
 import {
+  SCHOOL_ROLE_CATALOG,
+  SCHOOL_ROLE_MAP,
+  doesRoleRequireApproval,
   extractLibraryIdentity,
   type LibraryIdentity,
 } from '@/lib/domain/settings-backup-rules';
@@ -53,6 +56,24 @@ export interface SessionUser {
   memberId: number | null;
   memberDocId?: string | null;
   permissions: string[];
+  approvalStatus?: 'approved' | 'pending' | 'rejected';
+  requestedRoleSlug?: string | null;
+}
+
+export interface SignupPayload {
+  fullName: string;
+  email: string;
+  username?: string;
+  password: string;
+  roleSlug: string;
+  unitOrClass?: string;
+  identityNumber?: string;
+}
+
+export interface SignupResult {
+  pendingApproval: boolean;
+  message: string;
+  user: SessionUser;
 }
 
 interface AuthContextValue {
@@ -64,27 +85,38 @@ interface AuthContextValue {
   isFirebaseSession: boolean;
   refreshSession: () => Promise<void>;
   loginWithCredentials: (identifier: string, password: string) => Promise<SessionUser>;
-  loginWithGoogle: () => Promise<SessionUser>;
+  signupWithCredentials: (payload: SignupPayload) => Promise<SignupResult>;
+  loginWithGoogle: (requestedRoleSlug?: string) => Promise<SessionUser>;
   logout: (redirectTo?: string) => Promise<void>;
   can: (permission: string) => boolean;
 }
 
 const defaultLibrary: LibraryIdentity = extractLibraryIdentity();
 
-const ROLE_LABELS: Record<string, string> = {
-  super_admin: 'Super Admin',
-  kepala_perpustakaan: 'Kepala Perpustakaan',
-  pustakawan: 'Pustakawan',
-  anggota: 'Siswa / Guru',
-};
+const ROLE_LABELS: Record<string, string> = Object.fromEntries(
+  SCHOOL_ROLE_CATALOG.map((r) => [r.slug, r.name])
+);
 
 const AuthContext = createContext<AuthContextValue | null>(null);
 
 function isStaffRoleSlug(slug: string): boolean {
-  return ['super_admin', 'kepala_perpustakaan', 'pustakawan'].includes(slug);
+  return [
+    'super_admin',
+    'kepala_sekolah',
+    'wakil_kepala_sekolah',
+    'kepala_perpustakaan',
+    'admin_perpus',
+    'pustakawan',
+    'staff_tu',
+    'bendahara_sekolah',
+    'operator_it',
+  ].includes(slug);
 }
 
-async function resolveFirebaseSession(fbUser: FirebaseUser): Promise<{
+async function resolveFirebaseSession(
+  fbUser: FirebaseUser,
+  signupRequestedRoleSlug?: string
+): Promise<{
   sessionUser: SessionUser;
   libraryIdentity: LibraryIdentity | null;
 }> {
@@ -107,7 +139,7 @@ async function resolveFirebaseSession(fbUser: FirebaseUser): Promise<{
       const roleSnap = await getDoc(doc(db, 'staff_roles', uid));
       if (roleSnap.exists() && roleSnap.data().isActive === true) {
         const candidate = String(roleSnap.data().role || 'anggota');
-        if (['super_admin', 'kepala_perpustakaan', 'pustakawan', 'anggota'].includes(candidate)) {
+        if (/^[a-z][a-z0-9_]*$/.test(candidate)) {
           roleSlug = candidate;
         }
       }
@@ -117,6 +149,12 @@ async function resolveFirebaseSession(fbUser: FirebaseUser): Promise<{
   }
 
   // 2. Ensure /users/{uid} exists (always create with role: 'anggota' per security rules)
+  const cleanRequestedRole =
+    signupRequestedRoleSlug && signupRequestedRoleSlug !== 'super_admin' && /^[a-z][a-z0-9_]*$/.test(signupRequestedRoleSlug)
+      ? signupRequestedRoleSlug
+      : '';
+  const needsApproval = cleanRequestedRole ? doesRoleRequireApproval(cleanRequestedRole) : false;
+
   let userDocData: Record<string, unknown> | null = null;
   try {
     const userSnap = await getDoc(doc(db, 'users', uid));
@@ -126,6 +164,8 @@ async function resolveFirebaseSession(fbUser: FirebaseUser): Promise<{
         email,
         fullName: displayName,
         role: 'anggota',
+        ...(cleanRequestedRole ? { requestedRole: cleanRequestedRole } : {}),
+        approvalStatus: needsApproval ? 'pending' : 'approved',
         memberId: '',
         memberCode: '',
         isActive: true,
@@ -135,6 +175,7 @@ async function resolveFirebaseSession(fbUser: FirebaseUser): Promise<{
       if (roleSlug === 'super_admin') {
         await updateDoc(doc(db, 'users', uid), {
           role: 'super_admin',
+          approvalStatus: 'approved',
           updatedAt: serverTimestamp(),
         });
       }
@@ -143,6 +184,8 @@ async function resolveFirebaseSession(fbUser: FirebaseUser): Promise<{
         email,
         fullName: displayName,
         role: roleSlug,
+        requestedRole: cleanRequestedRole,
+        approvalStatus: roleSlug === 'super_admin' ? 'approved' : needsApproval ? 'pending' : 'approved',
         memberId: '',
         memberCode: '',
       };
@@ -151,8 +194,17 @@ async function resolveFirebaseSession(fbUser: FirebaseUser): Promise<{
       if (roleSlug === 'super_admin' && userDocData?.role !== 'super_admin') {
         await updateDoc(doc(db, 'users', uid), {
           role: 'super_admin',
+          approvalStatus: 'approved',
           updatedAt: serverTimestamp(),
         });
+      }
+      if (
+        roleSlug === 'anggota' &&
+        userDocData?.role &&
+        typeof userDocData.role === 'string' &&
+        !isStaffRoleSlug(userDocData.role)
+      ) {
+        roleSlug = userDocData.role;
       }
     }
   } catch (err) {
@@ -164,10 +216,10 @@ async function resolveFirebaseSession(fbUser: FirebaseUser): Promise<{
     await ensureFirestoreSeeded(uid, displayName);
   }
 
-  // 4. Ensure linked member record for 'anggota' (query by ownerUid to avoid get on missing doc)
+  // 4. Ensure linked member record for non-staff / non-visitor users
   let memberDocId: string | null = userDocData?.memberId ? String(userDocData.memberId) : null;
   let memberNumericId: number | null = null;
-  if (roleSlug === 'anggota') {
+  if (!isStaffRoleSlug(roleSlug) && roleSlug !== 'pengunjung') {
     try {
       const mQuery = query(collection(db, 'members'), where('ownerUid', '==', uid));
       const mSnap = await getDocs(mQuery);
@@ -190,7 +242,7 @@ async function resolveFirebaseSession(fbUser: FirebaseUser): Promise<{
           membershipTypeName: 'Siswa Kelas 4–6',
           identityNumber: '',
           gender: 'Tidak Disebutkan',
-          unitOrClass: 'Siswa SD',
+          unitOrClass: ROLE_LABELS[roleSlug] || 'Siswa SD',
           address: '',
           phone: '',
           email,
@@ -219,7 +271,11 @@ async function resolveFirebaseSession(fbUser: FirebaseUser): Promise<{
 
   // 5. Load library identity and role permissions
   let libraryIdentity: LibraryIdentity | null = null;
-  let permissions = ROLE_PERMISSION_DEFAULTS[roleSlug] || ROLE_PERMISSION_DEFAULTS.anggota;
+  let permissions =
+    ROLE_PERMISSION_DEFAULTS[roleSlug] ||
+    SCHOOL_ROLE_MAP.get(roleSlug)?.permissions ||
+    ROLE_PERMISSION_DEFAULTS.anggota;
+  let customRoleName = '';
 
   try {
     const globalSnap = await getDoc(doc(db, 'library_settings', 'global'));
@@ -231,17 +287,18 @@ async function resolveFirebaseSession(fbUser: FirebaseUser): Promise<{
     // Public fallback to defaultLibrary if unseeded yet
   }
 
-  if (isStaffRoleSlug(roleSlug)) {
+  if (isStaffRoleSlug(roleSlug) || !SCHOOL_ROLE_MAP.has(roleSlug)) {
     try {
       const rbacSnap = await getDoc(doc(db, 'library_settings', 'rbac'));
       if (rbacSnap.exists()) {
         const rp = (rbacSnap.data().rolePermissions as Record<string, string[]>) || {};
+        const customRoles =
+          (rbacSnap.data().customRoles as Record<string, { name?: string }>) || {};
+        if (customRoles[roleSlug]?.name) {
+          customRoleName = String(customRoles[roleSlug].name);
+        }
         if (Array.isArray(rp[roleSlug])) {
-          const loaded = [...rp[roleSlug]];
-          if (!loaded.includes('schedules.read') && !loaded.includes('schedules.write') && !loaded.includes('*')) {
-            loaded.push('schedules.read', 'schedules.write');
-          }
-          permissions = loaded;
+          permissions = [...rp[roleSlug]];
         }
       }
     } catch {
@@ -249,7 +306,10 @@ async function resolveFirebaseSession(fbUser: FirebaseUser): Promise<{
     }
   }
 
-  const roleName = ROLE_LABELS[roleSlug] || 'Siswa / Guru';
+  const roleName = customRoleName || ROLE_LABELS[roleSlug] || 'Siswa / Guru';
+  const approvalStatus = (userDocData?.approvalStatus as 'approved' | 'pending' | 'rejected') || 'approved';
+  const requestedRoleSlug = userDocData?.requestedRole ? String(userDocData.requestedRole) : null;
+
   setGatewayFirebaseActor({
     uid,
     email,
@@ -272,6 +332,8 @@ async function resolveFirebaseSession(fbUser: FirebaseUser): Promise<{
     memberId: memberNumericId,
     memberDocId,
     permissions,
+    approvalStatus,
+    requestedRoleSlug,
   };
 
   return { sessionUser, libraryIdentity };
@@ -478,7 +540,65 @@ export function AuthProvider({
     [loadLocalSession]
   );
 
-  const loginWithGoogle = useCallback(async () => {
+  const signupWithCredentials = useCallback(
+    async (payload: SignupPayload): Promise<SignupResult> => {
+      loginInProgressRef.current = true;
+      try {
+        const auth = getAuthClient();
+        if (auth.currentUser) {
+          try {
+            await signOut(auth);
+          } catch {
+            // ignore
+          }
+        }
+        setGatewayFirebaseActor(null);
+        setFirebaseUid(null);
+        setAuthMode('local');
+
+        const res = await fetch('/api/auth/signup', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload),
+        });
+        const data = await res.json();
+        if (!res.ok) {
+          throw new Error(data.error || 'Pendaftaran akun gagal.');
+        }
+
+        const signedUser = data.user as SessionUser;
+        if (data.pendingApproval) {
+          return {
+            pendingApproval: true,
+            message: String(data.message || 'Menunggu persetujuan Super Admin.'),
+            user: signedUser,
+          };
+        }
+
+        if (data.token) {
+          setLocalSessionToken(String(data.token));
+        }
+        setUser(signedUser);
+        setAuthMode('local');
+        setFirebaseUid(null);
+        setAuthReady(true);
+        markGatewayAuthReady();
+        setLoading(false);
+        void loadLocalSession();
+
+        return {
+          pendingApproval: false,
+          message: 'Akun berhasil dibuat.',
+          user: signedUser,
+        };
+      } finally {
+        loginInProgressRef.current = false;
+      }
+    },
+    [loadLocalSession]
+  );
+
+  const loginWithGoogle = useCallback(async (requestedRoleSlug?: string) => {
     loginInProgressRef.current = true;
     try {
       const auth = getAuthClient();
@@ -495,7 +615,10 @@ export function AuthProvider({
         // ignore
       }
 
-      const { sessionUser, libraryIdentity } = await resolveFirebaseSession(cred.user);
+      const { sessionUser, libraryIdentity } = await resolveFirebaseSession(
+        cred.user,
+        requestedRoleSlug
+      );
       setUser(sessionUser);
       if (libraryIdentity) setLibrary(libraryIdentity);
       setAuthMode('firebase');
@@ -552,6 +675,7 @@ export function AuthProvider({
         isFirebaseSession: authMode === 'firebase',
         refreshSession,
         loginWithCredentials,
+        signupWithCredentials,
         loginWithGoogle,
         logout,
         can,

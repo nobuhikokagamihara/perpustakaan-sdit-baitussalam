@@ -160,12 +160,386 @@ export const CORE_BACKUP_MODULES: BackupModuleId[] = [
   'system',
 ];
 
-export const SYSTEM_ROLE_SLUGS = new Set([
-  'super_admin',
-  'kepala_perpustakaan',
-  'pustakawan',
-  'petugas_sirkulasi',
+export type SchoolRoleCategory =
+  | 'Pimpinan & Pengelola'
+  | 'Staf & Tenaga Kependidikan'
+  | 'Pendidik & Pembina'
+  | 'Peserta Didik & Orang Tua';
+
+export interface SchoolRoleDefinition {
+  slug: string;
+  name: string;
+  category: SchoolRoleCategory;
+  description: string;
+  requiresApproval: boolean;
+  allowSelfSignup: boolean;
+  defaultMembershipTypeCode: 'SISWA_RENDAH' | 'SISWA_TINGGI' | 'GURU' | 'STAF' | 'KOMITE' | null;
+  permissions: string[];
+}
+
+export const ALL_STANDARD_PERMISSIONS: string[] = [
+  'dashboard.view',
+  'books.read',
+  'books.write',
+  'books.archive',
+  'books.import_export',
+  'members.read',
+  'members.write',
+  'members.block',
+  'loans.read',
+  'loans.write',
+  'returns.write',
+  'reservations.read',
+  'reservations.write',
+  'fines.read',
+  'fines.pay',
+  'fines.waive',
+  'inventory.read',
+  'inventory.write',
+  'acquisitions.read',
+  'acquisitions.write',
+  'acquisitions.approve',
+  'reports.read',
+  'notifications.read',
+  'settings.read',
+  'settings.write',
+  'audit.read',
+  'schedules.read',
+  'schedules.write',
+];
+
+const MEMBER_BASE_PERMISSIONS = [
+  'books.read',
+  'loans.read',
+  'reservations.read',
+  'reservations.write',
+  'fines.read',
+  'notifications.read',
+  'schedules.read',
+];
+
+export const SCHOOL_ROLE_CATALOG: SchoolRoleDefinition[] = [
+  {
+    slug: 'super_admin',
+    name: 'Super Admin',
+    category: 'Pimpinan & Pengelola',
+    description:
+      'Akses penuh seluruh sistem perpustakaan sekolah, manajemen akun, persetujuan peran, konfigurasi, dan backup.',
+    requiresApproval: true,
+    allowSelfSignup: false,
+    defaultMembershipTypeCode: null,
+    permissions: ['*'],
+  },
+  {
+    slug: 'kepala_sekolah',
+    name: 'Kepala Sekolah',
+    category: 'Pimpinan & Pengelola',
+    description:
+      'Pimpinan sekolah: memantau dashboard eksekutif, laporan literasi, persetujuan pengadaan, pengecualian denda, jadwal baca, dan audit sistem.',
+    requiresApproval: true,
+    allowSelfSignup: true,
+    defaultMembershipTypeCode: 'GURU',
+    permissions: [
+      'dashboard.view',
+      'books.read',
+      'members.read',
+      'loans.read',
+      'reservations.read',
+      'fines.read',
+      'fines.waive',
+      'inventory.read',
+      'acquisitions.read',
+      'acquisitions.approve',
+      'reports.read',
+      'notifications.read',
+      'settings.read',
+      'audit.read',
+      'schedules.read',
+    ],
+  },
+  {
+    slug: 'wakil_kepala_sekolah',
+    name: 'Wakil Kepala Sekolah',
+    category: 'Pimpinan & Pengelola',
+    description:
+      'Wakil Kepala Sekolah bidang Kurikulum/Kesiswaan: memantau laporan literasi, jadwal baca kelas, persetujuan pengadaan, dan data anggota.',
+    requiresApproval: true,
+    allowSelfSignup: true,
+    defaultMembershipTypeCode: 'GURU',
+    permissions: [
+      'dashboard.view',
+      'books.read',
+      'members.read',
+      'loans.read',
+      'reservations.read',
+      'fines.read',
+      'inventory.read',
+      'acquisitions.read',
+      'acquisitions.approve',
+      'reports.read',
+      'notifications.read',
+      'audit.read',
+      'schedules.read',
+      'schedules.write',
+    ],
+  },
+  {
+    slug: 'kepala_perpustakaan',
+    name: 'Kepala Perpustakaan',
+    category: 'Pimpinan & Pengelola',
+    description:
+      'Mengelola koleksi SD, anggota sekolah, menyetujui pengadaan buku, pengecualian denda, melihat laporan literasi, dan memantau aktivitas.',
+    requiresApproval: true,
+    allowSelfSignup: true,
+    defaultMembershipTypeCode: 'STAF',
+    permissions: ALL_STANDARD_PERMISSIONS.filter((c) => c !== 'settings.write'),
+  },
+  {
+    slug: 'admin_perpus',
+    name: 'Admin Perpustakaan',
+    category: 'Pimpinan & Pengelola',
+    description:
+      'Administrator harian perpustakaan: mengelola katalog buku, anggota, sirkulasi, stock opname, pengadaan, jadwal baca, dan laporan.',
+    requiresApproval: true,
+    allowSelfSignup: true,
+    defaultMembershipTypeCode: 'STAF',
+    permissions: ALL_STANDARD_PERMISSIONS.filter((c) => c !== 'settings.write'),
+  },
+  {
+    slug: 'pustakawan',
+    name: 'Pustakawan / Petugas',
+    category: 'Staf & Tenaga Kependidikan',
+    description:
+      'Mengelola buku, data siswa/guru, peminjaman, pengembalian, reservasi, denda, jadwal baca, dan inventaris rak.',
+    requiresApproval: true,
+    allowSelfSignup: true,
+    defaultMembershipTypeCode: 'STAF',
+    permissions: [
+      'dashboard.view',
+      'books.read',
+      'books.write',
+      'books.import_export',
+      'members.read',
+      'members.write',
+      'members.block',
+      'loans.read',
+      'loans.write',
+      'returns.write',
+      'reservations.read',
+      'reservations.write',
+      'fines.read',
+      'fines.pay',
+      'inventory.read',
+      'inventory.write',
+      'acquisitions.read',
+      'acquisitions.write',
+      'reports.read',
+      'notifications.read',
+      'schedules.read',
+      'schedules.write',
+    ],
+  },
+  {
+    slug: 'staff_tu',
+    name: 'Staf Tata Usaha (TU)',
+    category: 'Staf & Tenaga Kependidikan',
+    description:
+      'Administrasi data anggota siswa/guru, import data rombel, pemantauan tagihan denda, jadwal baca, dan laporan.',
+    requiresApproval: true,
+    allowSelfSignup: true,
+    defaultMembershipTypeCode: 'STAF',
+    permissions: [
+      'dashboard.view',
+      'books.read',
+      'members.read',
+      'members.write',
+      'loans.read',
+      'reservations.read',
+      'fines.read',
+      'fines.pay',
+      'reports.read',
+      'notifications.read',
+      'schedules.read',
+    ],
+  },
+  {
+    slug: 'bendahara_sekolah',
+    name: 'Bendahara Sekolah',
+    category: 'Staf & Tenaga Kependidikan',
+    description:
+      'Memantau penerimaan pembayaran denda, verifikasi anggaran pengadaan buku, dan laporan keuangan perpustakaan.',
+    requiresApproval: true,
+    allowSelfSignup: true,
+    defaultMembershipTypeCode: 'STAF',
+    permissions: [
+      'dashboard.view',
+      'books.read',
+      'members.read',
+      'fines.read',
+      'fines.pay',
+      'fines.waive',
+      'acquisitions.read',
+      'acquisitions.approve',
+      'reports.read',
+      'notifications.read',
+      'audit.read',
+    ],
+  },
+  {
+    slug: 'operator_it',
+    name: 'Operator IT / Dapodik',
+    category: 'Staf & Tenaga Kependidikan',
+    description:
+      'Sinkronisasi data siswa dan rombongan belajar, dukungan inventaris, audit aktivitas, dan pemantauan pengaturan sistem.',
+    requiresApproval: true,
+    allowSelfSignup: true,
+    defaultMembershipTypeCode: 'STAF',
+    permissions: [
+      'dashboard.view',
+      'books.read',
+      'books.import_export',
+      'members.read',
+      'members.write',
+      'inventory.read',
+      'reports.read',
+      'notifications.read',
+      'settings.read',
+      'audit.read',
+      'schedules.read',
+    ],
+  },
+  {
+    slug: 'petugas_kebersihan_keamanan',
+    name: 'Tenaga Kebersihan & Keamanan',
+    category: 'Staf & Tenaga Kependidikan',
+    description:
+      'Staf kebersihan, penjaga sekolah, dan keamanan: akses katalog OPAC, riwayat pinjaman pribadi, reservasi, dan jadwal ruang.',
+    requiresApproval: false,
+    allowSelfSignup: true,
+    defaultMembershipTypeCode: 'STAF',
+    permissions: [...MEMBER_BASE_PERMISSIONS],
+  },
+  {
+    slug: 'wali_kelas',
+    name: 'Wali Kelas',
+    category: 'Pendidik & Pembina',
+    description:
+      'Guru wali kelas SD: mengakses OPAC, pinjaman pribadi, reservasi, serta mengelola jadwal baca dan absensi literasi kelas.',
+    requiresApproval: false,
+    allowSelfSignup: true,
+    defaultMembershipTypeCode: 'GURU',
+    permissions: [...MEMBER_BASE_PERMISSIONS, 'schedules.write'],
+  },
+  {
+    slug: 'guru_mapel',
+    name: 'Guru Mata Pelajaran',
+    category: 'Pendidik & Pembina',
+    description:
+      'Guru bidang studi (PAI, PJOK, Bahasa Inggris, Seni, dll.): mengakses OPAC, pinjaman referensi ajar, reservasi, dan jadwal baca.',
+    requiresApproval: false,
+    allowSelfSignup: true,
+    defaultMembershipTypeCode: 'GURU',
+    permissions: [...MEMBER_BASE_PERMISSIONS, 'acquisitions.read'],
+  },
+  {
+    slug: 'guru_pendamping',
+    name: 'Guru Pendamping / Pembina Literasi',
+    category: 'Pendidik & Pembina',
+    description:
+      'Guru pendamping pojok baca dan pembina ekstrakurikuler literasi: mencatat absensi sesi baca kelas, OPAC, dan reservasi.',
+    requiresApproval: false,
+    allowSelfSignup: true,
+    defaultMembershipTypeCode: 'GURU',
+    permissions: [...MEMBER_BASE_PERMISSIONS, 'schedules.write'],
+  },
+  {
+    slug: 'guru_bk',
+    name: 'Guru BK / Pembina Karakter',
+    category: 'Pendidik & Pembina',
+    description:
+      'Pembina karakter dan konseling siswa: mengakses katalog OPAC, jadwal literasi, serta memantau keterlambatan dan status keanggotaan siswa.',
+    requiresApproval: false,
+    allowSelfSignup: true,
+    defaultMembershipTypeCode: 'GURU',
+    permissions: [...MEMBER_BASE_PERMISSIONS, 'members.read'],
+  },
+  {
+    slug: 'siswa',
+    name: 'Siswa',
+    category: 'Peserta Didik & Orang Tua',
+    description:
+      'Peserta didik SD: mencari koleksi buku di OPAC, melihat pinjaman pribadi, status denda, reservasi, dan jadwal baca kelas.',
+    requiresApproval: false,
+    allowSelfSignup: true,
+    defaultMembershipTypeCode: 'SISWA_TINGGI',
+    permissions: [...MEMBER_BASE_PERMISSIONS],
+  },
+  {
+    slug: 'duta_literasi',
+    name: 'Duta Literasi / Pustakawan Cilik',
+    category: 'Peserta Didik & Orang Tua',
+    description:
+      'Siswa penggerak pojok baca kelas: akses OPAC, reservasi, jadwal literasi, serta membantu memantau ketersediaan buku dan rak.',
+    requiresApproval: false,
+    allowSelfSignup: true,
+    defaultMembershipTypeCode: 'SISWA_TINGGI',
+    permissions: [...MEMBER_BASE_PERMISSIONS, 'inventory.read'],
+  },
+  {
+    slug: 'komite_sekolah',
+    name: 'Komite Sekolah / Orang Tua',
+    category: 'Peserta Didik & Orang Tua',
+    description:
+      'Orang tua/wali murid dan komite sekolah: mengakses katalog OPAC, pinjaman pribadi, reservasi bacaan anak, dan jadwal literasi.',
+    requiresApproval: false,
+    allowSelfSignup: true,
+    defaultMembershipTypeCode: 'KOMITE',
+    permissions: [...MEMBER_BASE_PERMISSIONS],
+  },
+  {
+    slug: 'anggota',
+    name: 'Siswa / Guru (Anggota Umum)',
+    category: 'Peserta Didik & Orang Tua',
+    description:
+      'Mengakses katalog OPAC sekolah, riwayat pinjaman pribadi, status denda, reservasi, dan perpanjangan.',
+    requiresApproval: false,
+    allowSelfSignup: true,
+    defaultMembershipTypeCode: 'SISWA_TINGGI',
+    permissions: [...MEMBER_BASE_PERMISSIONS],
+  },
+  {
+    slug: 'pengunjung',
+    name: 'Pengunjung / Tamu',
+    category: 'Peserta Didik & Orang Tua',
+    description:
+      'Melihat katalog publik OPAC perpustakaan SD dan informasi ketersediaan buku.',
+    requiresApproval: false,
+    allowSelfSignup: true,
+    defaultMembershipTypeCode: null,
+    permissions: ['books.read'],
+  },
+];
+
+export const SCHOOL_ROLE_MAP = new Map<string, SchoolRoleDefinition>(
+  SCHOOL_ROLE_CATALOG.map((r) => [r.slug, r])
+);
+
+export const APPROVAL_REQUIRED_ROLE_SLUGS = new Set(
+  SCHOOL_ROLE_CATALOG.filter((r) => r.requiresApproval).map((r) => r.slug)
+);
+
+export const MEMBER_ONLY_DEFAULT_ROUTE_SLUGS = new Set([
   'anggota',
+  'siswa',
+  'duta_literasi',
+  'komite_sekolah',
+  'pengunjung',
+  'petugas_kebersihan_keamanan',
+]);
+
+export const SYSTEM_ROLE_SLUGS = new Set([
+  ...SCHOOL_ROLE_CATALOG.map((r) => r.slug),
+  'petugas_sirkulasi',
 ]);
 
 export const DEFAULT_SYSTEM_SETTINGS: Record<string, string> = {
@@ -837,6 +1211,75 @@ export function validatePasswordStrength(password: string): { ok: boolean; reaso
     return { ok: false, reason: 'Kata sandi harus mengandung kombinasi huruf dan angka.' };
   }
   return { ok: true };
+}
+
+export function doesRoleRequireApproval(
+  roleSlug: string,
+  customRequiresApproval?: boolean | number | null
+): boolean {
+  if (customRequiresApproval !== undefined && customRequiresApproval !== null) {
+    return Boolean(customRequiresApproval);
+  }
+  return APPROVAL_REQUIRED_ROLE_SLUGS.has(roleSlug);
+}
+
+export function isStaffOperationalPermissions(permissions: string[]): boolean {
+  if (permissions.includes('*')) return true;
+  return (
+    permissions.includes('dashboard.view') ||
+    permissions.includes('loans.write') ||
+    permissions.includes('books.write') ||
+    permissions.includes('members.read') ||
+    permissions.includes('fines.pay') ||
+    permissions.includes('settings.read')
+  );
+}
+
+export function normalizeUsernameFromInput(rawUsername: string, email: string): string {
+  const source = rawUsername.trim() || email.split('@')[0] || '';
+  return source
+    .toLowerCase()
+    .replace(/[^a-z0-9._-]+/g, '.')
+    .replace(/^[._-]+|[._-]+$/g, '')
+    .slice(0, 40);
+}
+
+export function validateSignupInput(input: {
+  fullName: string;
+  email: string;
+  username?: string;
+  password: string;
+  roleSlug: string;
+}): { ok: boolean; reason?: string; cleanUsername?: string; cleanEmail?: string; cleanFullName?: string } {
+  const cleanFullName = String(input.fullName || '').trim();
+  if (cleanFullName.length < 2 || cleanFullName.length > 120) {
+    return { ok: false, reason: 'Nama lengkap minimal 2 hingga 120 karakter.' };
+  }
+  const cleanEmail = String(input.email || '').trim().toLowerCase();
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(cleanEmail) || cleanEmail.length > 160) {
+    return { ok: false, reason: 'Format alamat email tidak valid.' };
+  }
+  const cleanUsername = normalizeUsernameFromInput(String(input.username || ''), cleanEmail);
+  if (cleanUsername.length < 3 || !/^[a-z0-9][a-z0-9._-]*$/.test(cleanUsername)) {
+    return {
+      ok: false,
+      reason: 'Username minimal 3 karakter (huruf kecil, angka, titik, garis bawah, atau tanda hubung).',
+    };
+  }
+  const passCheck = validatePasswordStrength(input.password);
+  if (!passCheck.ok) {
+    return { ok: false, reason: passCheck.reason };
+  }
+  const roleSlug = String(input.roleSlug || '').trim();
+  if (!roleSlug || roleSlug === 'super_admin') {
+    return { ok: false, reason: 'Peran yang dipilih tidak tersedia untuk pendaftaran mandiri.' };
+  }
+  return {
+    ok: true,
+    cleanFullName,
+    cleanEmail,
+    cleanUsername,
+  };
 }
 
 export function formatBytes(bytes: number): string {

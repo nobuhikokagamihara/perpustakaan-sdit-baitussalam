@@ -1,6 +1,7 @@
 'use client';
 
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { Suspense, useCallback, useEffect, useState } from 'react';
+import { useSearchParams } from 'next/navigation';
 import {
   Building2,
   Database,
@@ -35,7 +36,14 @@ const TABS: Array<{ key: SettingsTabKey; label: string; icon: React.ComponentTyp
   { key: 'backup', label: 'Backup & Restore', icon: Database },
 ];
 
-export default function SettingsPage() {
+function SettingsContent() {
+  const searchParams = useSearchParams();
+  const initialTabParam = searchParams.get('tab');
+  const initialTab: SettingsTabKey =
+    initialTabParam && ['general', 'policies', 'rbac', 'users', 'audit', 'backup'].includes(initialTabParam)
+      ? (initialTabParam as SettingsTabKey)
+      : 'general';
+
   const { user, loading: authLoading, can, authMode, refreshSession } = useAuth();
   const { showToast } = useToast();
   const notify = useCallback(
@@ -48,7 +56,7 @@ export default function SettingsPage() {
   const canWrite = can('settings.write');
   const isFirebaseMode = authMode === 'firebase';
 
-  const [tab, setTab] = useState<SettingsTabKey>('general');
+  const [tab, setTab] = useState<SettingsTabKey>(initialTab);
   const [data, setData] = useState<SettingsPayload | null>(null);
   const [settingsDraft, setSettingsDraft] = useState<Record<string, string>>({});
   const [policiesDraft, setPoliciesDraft] = useState<MembershipTypeRow[]>([]);
@@ -129,6 +137,13 @@ export default function SettingsPage() {
             >
               <Icon className="h-3.5 w-3.5" />
               {t.label}
+              {t.key === 'users' &&
+                data?.users &&
+                data.users.filter((u) => u.approval_status === 'pending').length > 0 && (
+                  <span className="ml-0.5 rounded-full bg-[#E56B63] px-1.5 py-0.5 font-mono text-[10px] font-semibold text-white tabular-nums">
+                    {data.users.filter((u) => u.approval_status === 'pending').length}
+                  </span>
+                )}
               {t.key === 'backup' && data?.backupSummary && (
                 <span
                   className={`ml-0.5 font-mono text-[10px] tabular-nums ${
@@ -175,6 +190,7 @@ export default function SettingsPage() {
               permissions={data.permissions}
               rolePermissions={data.rolePermissions}
               staffRoles={data.staffRoles}
+              currentUserRoleSlug={user?.roleSlug}
               isFirebaseMode={isFirebaseMode}
               canWrite={canWrite}
               onSaved={handleSettingsMutated}
@@ -187,6 +203,7 @@ export default function SettingsPage() {
               users={data.users}
               roles={data.roles}
               currentUserId={user?.id}
+              currentUserRoleSlug={user?.roleSlug}
               isFirebaseMode={isFirebaseMode}
               canWrite={canWrite}
               onSaved={handleSettingsMutated}
@@ -206,5 +223,13 @@ export default function SettingsPage() {
         </>
       ) : null}
     </AppShell>
+  );
+}
+
+export default function SettingsPage() {
+  return (
+    <Suspense fallback={<LoadingState rows={6} />}>
+      <SettingsContent />
+    </Suspense>
   );
 }

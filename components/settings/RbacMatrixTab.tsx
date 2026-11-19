@@ -34,22 +34,33 @@ interface RbacMatrixTabProps {
   permissions: PermissionRow[];
   rolePermissions: RolePermissionRow[];
   staffRoles?: StaffRoleRow[];
+  currentUserRoleSlug?: string;
   isFirebaseMode: boolean;
   canWrite: boolean;
   onSaved: () => Promise<void>;
   notify: (msg: string, tone?: 'success' | 'error' | 'info') => void;
 }
 
+const ROLE_CATEGORIES = [
+  'Pimpinan & Pengelola',
+  'Staf & Tenaga Kependidikan',
+  'Pendidik & Pembina',
+  'Peserta Didik & Orang Tua',
+  'Kustom',
+];
+
 export function RbacMatrixTab({
   roles,
   permissions,
   rolePermissions,
   staffRoles = [],
+  currentUserRoleSlug,
   isFirebaseMode,
   canWrite,
   onSaved,
   notify,
 }: RbacMatrixTabProps) {
+  const canManageRoles = canWrite && (currentUserRoleSlug === 'super_admin' || !currentUserRoleSlug);
   const [subView, setSubView] = useState<'editor' | 'matrix' | 'google'>('editor');
   const [selectedRoleId, setSelectedRoleId] = useState<number>(() => {
     const pustakawan = roles.find((r) => r.slug === 'pustakawan');
@@ -66,10 +77,17 @@ export function RbacMatrixTab({
     name: '',
     slug: '',
     description: '',
+    category: 'Kustom',
+    requiresApproval: false,
     cloneFromRoleId: '',
   });
   const [editRoleOpen, setEditRoleOpen] = useState(false);
-  const [editRoleForm, setEditRoleForm] = useState({ name: '', description: '' });
+  const [editRoleForm, setEditRoleForm] = useState({
+    name: '',
+    description: '',
+    category: 'Kustom',
+    requiresApproval: false,
+  });
   const [deleteRoleTarget, setDeleteRoleTarget] = useState<RoleRow | null>(null);
   const [roleBusy, setRoleBusy] = useState(false);
 
@@ -191,6 +209,8 @@ export function RbacMatrixTab({
           name: roleForm.name,
           slug: roleForm.slug || undefined,
           description: roleForm.description,
+          category: roleForm.category,
+          requiresApproval: roleForm.requiresApproval,
           cloneFromRoleId: roleForm.cloneFromRoleId ? Number(roleForm.cloneFromRoleId) : undefined,
         }),
       });
@@ -198,7 +218,14 @@ export function RbacMatrixTab({
       if (!res.ok) throw new Error(json.error || 'Gagal membuat peran kustom.');
       notify(`Peran kustom "${roleForm.name}" berhasil dibuat.`, 'success');
       setCreateRoleOpen(false);
-      setRoleForm({ name: '', slug: '', description: '', cloneFromRoleId: '' });
+      setRoleForm({
+        name: '',
+        slug: '',
+        description: '',
+        category: 'Kustom',
+        requiresApproval: false,
+        cloneFromRoleId: '',
+      });
       await onSaved();
       if (json.id) {
         setSelectedRoleId(Number(json.id));
@@ -225,6 +252,8 @@ export function RbacMatrixTab({
           slug: selectedRole.slug,
           name: editRoleForm.name,
           description: editRoleForm.description,
+          category: editRoleForm.category,
+          requiresApproval: editRoleForm.requiresApproval,
         }),
       });
       const json = await res.json();
@@ -351,10 +380,10 @@ export function RbacMatrixTab({
           )}
         </div>
 
-        {canWrite && subView !== 'google' && (
+        {canManageRoles && subView !== 'google' && (
           <Button size="sm" onClick={() => setCreateRoleOpen(true)}>
             <Plus className="h-4 w-4" />
-            Buat Peran Kustom
+            Tambah / Buat Peran Baru
           </Button>
         )}
       </div>
@@ -371,10 +400,10 @@ export function RbacMatrixTab({
               <span className="text-[11px] text-[#7B7D82]">Pilih untuk ubah izin</span>
             </div>
 
-            <div className="divide-y divide-[#ECE9E1] rounded-lg border border-[#E7E4DC] bg-white">
+            <div className="max-h-[720px] overflow-y-auto divide-y divide-[#ECE9E1] rounded-lg border border-[#E7E4DC] bg-white">
               {roles.map((r) => {
                 const isSelected = r.id === selectedRole?.id;
-                const isSys = SYSTEM_ROLE_SLUGS.has(r.slug);
+                const isSys = r.is_system === 1 || SYSTEM_ROLE_SLUGS.has(r.slug);
                 const permCount = rolePermLookup.get(r.id)?.size ?? r.permission_count ?? 0;
                 return (
                   <button
@@ -402,6 +431,7 @@ export function RbacMatrixTab({
                         }`}
                       >
                         {r.slug}
+                        {r.category ? ` · ${r.category}` : ''}
                       </p>
                       <p
                         className={`mt-1 line-clamp-2 text-[11px] ${
@@ -456,7 +486,7 @@ export function RbacMatrixTab({
                     </p>
                   </div>
 
-                  {canWrite && (
+                  {canManageRoles && (
                     <div className="flex flex-wrap items-center gap-2">
                       <Button
                         size="sm"
@@ -465,6 +495,8 @@ export function RbacMatrixTab({
                           setEditRoleForm({
                             name: selectedRole.name,
                             description: selectedRole.description,
+                            category: selectedRole.category || 'Kustom',
+                            requiresApproval: Boolean(selectedRole.requires_approval),
                           });
                           setEditRoleOpen(true);
                         }}
@@ -690,10 +722,13 @@ export function RbacMatrixTab({
               value={staffForm.role}
               onChange={(e) => setStaffForm((s) => ({ ...s, role: e.target.value }))}
             >
-              <option value="pustakawan">Pustakawan / Petugas</option>
-              <option value="kepala_perpustakaan">Kepala Perpustakaan</option>
-              <option value="super_admin">Super Admin</option>
-              <option value="anggota">Siswa / Guru (Anggota)</option>
+              {roles
+                .filter((r) => r.slug !== 'pengunjung')
+                .map((r) => (
+                  <option key={r.id} value={r.slug}>
+                    {r.name}
+                  </option>
+                ))}
             </SelectField>
             <Button type="submit" loading={staffBusy} className="w-full">
               Simpan Peran Staf Google
@@ -770,12 +805,32 @@ export function RbacMatrixTab({
             value={roleForm.slug}
             onChange={(e) => setRoleForm((f) => ({ ...f, slug: e.target.value }))}
           />
+          <SelectField
+            label="Kategori Peran"
+            value={roleForm.category}
+            onChange={(e) => setRoleForm((f) => ({ ...f, category: e.target.value }))}
+          >
+            {ROLE_CATEGORIES.map((cat) => (
+              <option key={cat} value={cat}>
+                {cat}
+              </option>
+            ))}
+          </SelectField>
           <TextField
             label="Deskripsi Tugas & Tanggung Jawab"
             placeholder="Mengelola jadwal baca kelas dan laporan kehadiran literasi."
             value={roleForm.description}
             onChange={(e) => setRoleForm((f) => ({ ...f, description: e.target.value }))}
           />
+          <label className="flex items-center gap-2.5 rounded-lg border border-[#E7E4DC] bg-white px-3 py-2.5 text-xs text-[#1E2433] cursor-pointer">
+            <input
+              type="checkbox"
+              checked={roleForm.requiresApproval}
+              onChange={(e) => setRoleForm((f) => ({ ...f, requiresApproval: e.target.checked }))}
+              className="h-4 w-4 rounded border-[#CFCAC0] accent-[#222B3A]"
+            />
+            <span>Wajib menunggu persetujuan Super Admin saat pendaftar memilih peran ini</span>
+          </label>
           <SelectField
             label="Salin Izin Awal dari Peran (Opsional)"
             value={roleForm.cloneFromRoleId}
@@ -813,11 +868,34 @@ export function RbacMatrixTab({
             onChange={(e) => setEditRoleForm((f) => ({ ...f, name: e.target.value }))}
             required
           />
+          <SelectField
+            label="Kategori Peran"
+            value={editRoleForm.category}
+            onChange={(e) => setEditRoleForm((f) => ({ ...f, category: e.target.value }))}
+          >
+            {ROLE_CATEGORIES.map((cat) => (
+              <option key={cat} value={cat}>
+                {cat}
+              </option>
+            ))}
+          </SelectField>
           <TextField
             label="Deskripsi Peran"
             value={editRoleForm.description}
             onChange={(e) => setEditRoleForm((f) => ({ ...f, description: e.target.value }))}
           />
+          <label className="flex items-center gap-2.5 rounded-lg border border-[#E7E4DC] bg-white px-3 py-2.5 text-xs text-[#1E2433] cursor-pointer">
+            <input
+              type="checkbox"
+              checked={editRoleForm.requiresApproval}
+              disabled={selectedRole?.slug === 'super_admin'}
+              onChange={(e) =>
+                setEditRoleForm((f) => ({ ...f, requiresApproval: e.target.checked }))
+              }
+              className="h-4 w-4 rounded border-[#CFCAC0] accent-[#222B3A]"
+            />
+            <span>Wajib persetujuan Super Admin saat Sign-Up</span>
+          </label>
           <div className="flex justify-end gap-2 border-t border-[#E7E4DC] pt-4">
             <Button type="button" variant="secondary" onClick={() => setEditRoleOpen(false)}>
               Batal

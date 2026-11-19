@@ -3,14 +3,17 @@ import assert from 'node:assert/strict';
 import {
   ALL_BACKUP_TABLES,
   BACKUP_MODULES,
+  SCHOOL_ROLE_CATALOG,
   buildBackupEnvelope,
   computeRestoreDiff,
   computeTablesChecksum,
+  doesRoleRequireApproval,
   evaluateBackupHealth,
   extractCirculationPolicy,
   extractLibraryIdentity,
   formatBytes,
   guardSuperAdminLockout,
+  isStaffOperationalPermissions,
   normalizeSelectedModules,
   parseNumberSetting,
   resolveTablesForModules,
@@ -19,6 +22,7 @@ import {
   validateCustomRoleInput,
   validateMembershipPolicyInput,
   validatePasswordStrength,
+  validateSignupInput,
 } from './settings-backup-rules';
 
 test('sha256Hex matches standard FIPS 180-4 test vectors', () => {
@@ -283,5 +287,63 @@ test('extractCirculationPolicy honors explicit zero values, reservation_expiry_d
   assert.equal(legacyFallback.allowPartialFinePayment, true);
   assert.equal(legacyFallback.allowOverdueRenewal, false);
   assert.equal(legacyFallback.policyApplicationMode, 'new_loans_only');
+});
+
+test('SCHOOL_ROLE_CATALOG covers whole school community and enforces approval rules for admin/kepala roles', () => {
+  const slugs = new Set(SCHOOL_ROLE_CATALOG.map((r) => r.slug));
+  for (const expected of [
+    'super_admin',
+    'kepala_sekolah',
+    'wakil_kepala_sekolah',
+    'kepala_perpustakaan',
+    'admin_perpus',
+    'pustakawan',
+    'staff_tu',
+    'bendahara_sekolah',
+    'operator_it',
+    'wali_kelas',
+    'guru_mapel',
+    'guru_pendamping',
+    'guru_bk',
+    'siswa',
+    'duta_literasi',
+    'komite_sekolah',
+    'petugas_kebersihan_keamanan',
+    'anggota',
+    'pengunjung',
+  ]) {
+    assert.ok(slugs.has(expected), `Missing school role ${expected}`);
+  }
+
+  assert.equal(doesRoleRequireApproval('admin_perpus'), true);
+  assert.equal(doesRoleRequireApproval('kepala_perpustakaan'), true);
+  assert.equal(doesRoleRequireApproval('kepala_sekolah'), true);
+  assert.equal(doesRoleRequireApproval('siswa'), false);
+  assert.equal(doesRoleRequireApproval('wali_kelas'), false);
+  assert.equal(doesRoleRequireApproval('komite_sekolah'), false);
+  assert.equal(doesRoleRequireApproval('custom_role', 1), true);
+
+  assert.equal(isStaffOperationalPermissions(['books.read', 'loans.read']), false);
+  assert.equal(isStaffOperationalPermissions(['dashboard.view', 'books.read']), true);
+  assert.equal(isStaffOperationalPermissions(['*']), true);
+
+  assert.equal(
+    validateSignupInput({
+      fullName: 'Budi Santoso',
+      email: 'budi@sd.sch.id',
+      password: 'Password123',
+      roleSlug: 'super_admin',
+    }).ok,
+    false
+  );
+  const validSignup = validateSignupInput({
+    fullName: 'Siti Aminah',
+    email: 'Siti.Aminah@sd.sch.id',
+    password: 'Password123',
+    roleSlug: 'kepala_sekolah',
+  });
+  assert.equal(validSignup.ok, true);
+  assert.equal(validSignup.cleanEmail, 'siti.aminah@sd.sch.id');
+  assert.equal(validSignup.cleanUsername, 'siti.aminah');
 });
 

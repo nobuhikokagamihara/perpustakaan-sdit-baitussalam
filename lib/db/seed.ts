@@ -5,6 +5,7 @@ import {
   buildSeedStudentsForClass,
   getClassPreset,
 } from '@/lib/domain/reading-schedule-rules';
+import { SCHOOL_ROLE_CATALOG } from '@/lib/domain/settings-backup-rules';
 
 export function seedDatabase(db: Database.Database): void {
   const roleCount = (db.prepare('SELECT COUNT(*) as c FROM roles').get() as { c: number }).c;
@@ -1002,8 +1003,72 @@ export function seedDatabase(db: Database.Database): void {
     );
   })();
 
+  seedSchoolRoles(db);
   seedReadingSchedules(db);
   seedClassRostersAndAttendance(db);
+}
+
+export function seedSchoolRoles(db: Database.Database): void {
+  const roleCount = (db.prepare('SELECT COUNT(*) as c FROM roles').get() as { c: number }).c;
+  if (roleCount === 0) return;
+
+  db.transaction(() => {
+    const permRows = db.prepare('SELECT id, code FROM permissions').all() as Array<{
+      id: number;
+      code: string;
+    }>;
+    const permMap = new Map(permRows.map((p) => [p.code, p.id]));
+    const getRole = db.prepare('SELECT id FROM roles WHERE slug = ?');
+    const insertRole = db.prepare(
+      `INSERT INTO roles (slug, name, description, category, requires_approval, is_system)
+       VALUES (?, ?, ?, ?, ?, 1)`
+    );
+    const updateRoleMeta = db.prepare(
+      `UPDATE roles SET category = ?, requires_approval = ?, is_system = 1 WHERE id = ?`
+    );
+    const countRolePerms = db.prepare(
+      'SELECT COUNT(*) as c FROM role_permissions WHERE role_id = ?'
+    );
+    const assignPerm = db.prepare(
+      'INSERT OR IGNORE INTO role_permissions (role_id, permission_id) VALUES (?, ?)'
+    );
+
+    for (const def of SCHOOL_ROLE_CATALOG) {
+      const existing = getRole.get(def.slug) as { id: number } | undefined;
+      let roleId: number;
+      let shouldSeedPerms = false;
+
+      if (existing) {
+        roleId = existing.id;
+        updateRoleMeta.run(def.category, def.requiresApproval ? 1 : 0, roleId);
+        const existingPermCount = (countRolePerms.get(roleId) as { c: number }).c;
+        if (existingPermCount === 0 && def.permissions.length > 0) {
+          shouldSeedPerms = true;
+        }
+      } else {
+        roleId = Number(
+          insertRole.run(
+            def.slug,
+            def.name,
+            def.description,
+            def.category,
+            def.requiresApproval ? 1 : 0
+          ).lastInsertRowid
+        );
+        shouldSeedPerms = true;
+      }
+
+      if (shouldSeedPerms) {
+        const codesToGrant = def.permissions.includes('*')
+          ? Array.from(permMap.keys())
+          : def.permissions;
+        for (const code of codesToGrant) {
+          const pid = permMap.get(code);
+          if (pid) assignPerm.run(roleId, pid);
+        }
+      }
+    }
+  })();
 }
 
 export function seedReadingSchedules(db: Database.Database): void {

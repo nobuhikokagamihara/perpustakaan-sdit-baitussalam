@@ -39,7 +39,7 @@ export async function getSessionUser(): Promise<AuthUser | null> {
     const db = getDb();
     const userRow = db
       .prepare(
-        `SELECT u.id, u.username, u.email, u.full_name, u.member_id, u.is_active,
+        `SELECT u.id, u.username, u.email, u.full_name, u.member_id, u.is_active, u.approval_status,
                 r.id as role_id, r.slug as role_slug, r.name as role_name
          FROM users u
          JOIN roles r ON r.id = u.role_id
@@ -53,13 +53,14 @@ export async function getSessionUser(): Promise<AuthUser | null> {
           full_name: string;
           member_id: number | null;
           is_active: number;
+          approval_status: string;
           role_id: number;
           role_slug: string;
           role_name: string;
         }
       | undefined;
 
-    if (!userRow || userRow.is_active !== 1) return null;
+    if (!userRow || userRow.is_active !== 1 || userRow.approval_status !== 'approved') return null;
 
     const permRows = db
       .prepare(

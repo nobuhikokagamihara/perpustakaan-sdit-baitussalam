@@ -3,6 +3,7 @@ import { getDb, getSettingsMap } from '@/lib/db';
 import { requirePermission } from '@/lib/auth/session';
 import { hashPassword } from '@/lib/auth/crypto';
 import { logAudit } from '@/lib/db/audit';
+import { ensureMemberRecordForUser } from '@/lib/db/member-link';
 import { addDaysIso, formatIsoDate } from '@/lib/domain/library-rules';
 import {
   DEFAULT_SYSTEM_SETTINGS,
@@ -65,11 +66,15 @@ export async function GET() {
 
   const users = db
     .prepare(
-      `SELECT u.id, u.username, u.email, u.full_name, u.is_active, u.role_id, u.created_at, u.updated_at,
-              r.name as role_name, r.slug as role_slug
+      `SELECT u.id, u.username, u.email, u.full_name, u.is_active, u.role_id,
+              u.approval_status, u.requested_role_id, u.approval_note, u.approved_at,
+              u.created_at, u.updated_at,
+              r.name as role_name, r.slug as role_slug,
+              rr.name as requested_role_name, rr.slug as requested_role_slug
        FROM users u
        JOIN roles r ON r.id = u.role_id
-       ORDER BY u.id ASC`
+       LEFT JOIN roles rr ON rr.id = u.requested_role_id
+       ORDER BY CASE WHEN u.approval_status = 'pending' THEN 0 ELSE 1 END, u.id ASC`
     )
     .all();
 
@@ -347,10 +352,17 @@ export async function PUT(req: NextRequest) {
     return NextResponse.json({ ok: true, id: createdId });
   }
 
+  const isSuperAdmin = auth.roleSlug === 'super_admin' || auth.permissions.includes('*');
+
   // 4. Create custom RBAC role (with optional clone from existing role)
   if (section === 'create_role') {
+    if (!isSuperAdmin) {
+      return NextResponse.json({ error: 'Hanya Super Admin yang dapat membuat peran baru.' }, { status: 403 });
+    }
     const name = String(body.name || '').trim();
     const description = String(body.description || '').trim().slice(0, 240);
+    const category = String(body.category || 'Kustom').trim().slice(0, 60) || 'Kustom';
+    const requiresApproval = body.requiresApproval ? 1 : 0;
     const cloneFromRoleId = body.cloneFromRoleId ? Number(body.cloneFromRoleId) : null;
 
     const validation = validateCustomRoleInput({
@@ -373,8 +385,10 @@ export async function PUT(req: NextRequest) {
     let roleId = 0;
     db.transaction(() => {
       const inserted = db
-        .prepare('INSERT INTO roles (slug, name, description) VALUES (?, ?, ?)')
-        .run(validation.normalizedSlug, name, description);
+        .prepare(
+          'INSERT INTO roles (slug, name, description, category, requires_approval, is_system) VALUES (?, ?, ?, ?, ?, 0)'
+        )
+        .run(validation.normalizedSlug, name, description, category, requiresApproval);
       roleId = Number(inserted.lastInsertRowid);
 
       if (cloneFromRoleId) {
@@ -395,7 +409,7 @@ export async function PUT(req: NextRequest) {
         action: 'RBAC_ROLE_CREATE',
         entityType: 'role',
         entityId: String(roleId),
-        after: { slug: validation.normalizedSlug, name, description, cloneFromRoleId },
+        after: { slug: validation.normalizedSlug, name, description, category, requiresApproval, cloneFromRoleId },
       });
     })();
 
@@ -404,6 +418,9 @@ export async function PUT(req: NextRequest) {
 
   // 5. Update RBAC role metadata
   if (section === 'update_role') {
+    if (!isSuperAdmin) {
+      return NextResponse.json({ error: 'Hanya Super Admin yang dapat mengubah peran.' }, { status: 403 });
+    }
     const roleId = Number(body.roleId || 0);
     const name = String(body.name || '').trim();
     const description = String(body.description || '').trim().slice(0, 240);
@@ -417,16 +434,36 @@ export async function PUT(req: NextRequest) {
       return NextResponse.json({ error: 'Peran tidak ditemukan.' }, { status: 404 });
     }
 
+    const nextCategory =
+      typeof body.category === 'string' && body.category.trim()
+        ? body.category.trim().slice(0, 60)
+        : String(existing.category || 'Kustom');
+    const nextRequiresApproval =
+      String(existing.slug) === 'super_admin'
+        ? 1
+        : body.requiresApproval !== undefined
+          ? body.requiresApproval
+            ? 1
+            : 0
+          : Number(existing.requires_approval || 0);
+
     db.transaction(() => {
-      db.prepare('UPDATE roles SET name = ?, description = ? WHERE id = ?').run(name, description, roleId);
+      db.prepare(
+        'UPDATE roles SET name = ?, description = ?, category = ?, requires_approval = ? WHERE id = ?'
+      ).run(name, description, nextCategory, nextRequiresApproval, roleId);
       logAudit(db, {
         userId: auth.id,
         userName: auth.fullName,
         action: 'RBAC_ROLE_UPDATE',
         entityType: 'role',
         entityId: String(roleId),
-        before: { name: existing.name, description: existing.description },
-        after: { name, description },
+        before: {
+          name: existing.name,
+          description: existing.description,
+          category: existing.category,
+          requires_approval: existing.requires_approval,
+        },
+        after: { name, description, category: nextCategory, requires_approval: nextRequiresApproval },
       });
     })();
     return NextResponse.json({ ok: true });
@@ -434,14 +471,17 @@ export async function PUT(req: NextRequest) {
 
   // 6. Delete custom non-system role (only if 0 users assigned)
   if (section === 'delete_role') {
+    if (!isSuperAdmin) {
+      return NextResponse.json({ error: 'Hanya Super Admin yang dapat menghapus peran.' }, { status: 403 });
+    }
     const roleId = Number(body.roleId || 0);
     const existing = db.prepare('SELECT * FROM roles WHERE id = ?').get(roleId) as
-      | { id: number; slug: string; name: string }
+      | { id: number; slug: string; name: string; is_system?: number }
       | undefined;
     if (!existing) {
       return NextResponse.json({ error: 'Peran tidak ditemukan.' }, { status: 404 });
     }
-    if (SYSTEM_ROLE_SLUGS.has(existing.slug)) {
+    if (existing.is_system === 1 || SYSTEM_ROLE_SLUGS.has(existing.slug)) {
       return NextResponse.json(
         { error: 'Peran bawaan sistem tidak dapat dihapus demi keamanan operasional.' },
         { status: 400 }
@@ -474,6 +514,9 @@ export async function PUT(req: NextRequest) {
 
   // 7. Update role permissions (with Super Admin anti-lockout guard)
   if (section === 'role_permissions') {
+    if (!isSuperAdmin) {
+      return NextResponse.json({ error: 'Hanya Super Admin yang dapat mengubah matriks izin peran.' }, { status: 403 });
+    }
     const roleId = Number(body.roleId || 0);
     const permIds = Array.isArray(body.permissionIds)
       ? body.permissionIds.map((x) => Number(x)).filter((x) => Number.isFinite(x) && x > 0)
@@ -529,6 +572,9 @@ export async function PUT(req: NextRequest) {
 
   // 8. Create user account
   if (section === 'create_user') {
+    if (!isSuperAdmin) {
+      return NextResponse.json({ error: 'Hanya Super Admin yang dapat membuat akun pengguna baru.' }, { status: 403 });
+    }
     const username = String(body.username || '').trim().toLowerCase();
     const email = String(body.email || '').trim().toLowerCase();
     const fullName = String(body.fullName || '').trim();
@@ -550,21 +596,32 @@ export async function PUT(req: NextRequest) {
       return NextResponse.json({ error: 'Username atau email sudah terdaftar.' }, { status: 409 });
     }
 
-    const roleExists = db.prepare('SELECT id, name FROM roles WHERE id = ?').get(roleId) as
-      | { id: number; name: string }
+    const roleExists = db.prepare('SELECT id, slug, name FROM roles WHERE id = ?').get(roleId) as
+      | { id: number; slug: string; name: string }
       | undefined;
     if (!roleExists) {
       return NextResponse.json({ error: 'Peran yang dipilih tidak valid.' }, { status: 400 });
     }
 
+    const prefix = getSettingsMap(db).member_code_prefix || 'AGT-2026-';
     let userId = 0;
     db.transaction(() => {
+      const linkedMemberId =
+        roleExists.slug === 'super_admin' || roleExists.slug === 'pengunjung'
+          ? null
+          : ensureMemberRecordForUser(db, {
+              fullName,
+              email,
+              roleSlug: roleExists.slug,
+              roleName: roleExists.name,
+              memberCodePrefix: prefix,
+            });
       const res = db
         .prepare(
-          `INSERT INTO users (username, email, full_name, password_hash, role_id, is_active)
-           VALUES (?, ?, ?, ?, ?, 1)`
+          `INSERT INTO users (username, email, full_name, password_hash, role_id, member_id, is_active, approval_status, approved_by_user_id, approved_at)
+           VALUES (?, ?, ?, ?, ?, ?, 1, 'approved', ?, datetime('now'))`
         )
-        .run(username, email, fullName, hashPassword(password), roleId);
+        .run(username, email, fullName, hashPassword(password), roleId, linkedMemberId, auth.id);
       userId = Number(res.lastInsertRowid);
       logAudit(db, {
         userId: auth.id,
@@ -578,34 +635,57 @@ export async function PUT(req: NextRequest) {
     return NextResponse.json({ ok: true, id: userId });
   }
 
-  // 9. Update user profile & role
-  if (section === 'update_user') {
-    const userId = Number(body.userId || 0);
-    const fullName = String(body.fullName || '').trim();
-    const email = String(body.email || '').trim().toLowerCase();
-    const roleId = Number(body.roleId || 0);
-
-    if (!userId || !fullName || !email || !roleId) {
-      return NextResponse.json({ error: 'Data pengguna dan peran wajib lengkap.' }, { status: 400 });
+  // 9. Update user profile & role (Super Admin can change role of any other account)
+  if (section === 'update_user' || section === 'change_user_role') {
+    if (!isSuperAdmin) {
+      return NextResponse.json(
+        { error: 'Hanya Super Admin yang dapat mengubah profil atau peran akun lain.' },
+        { status: 403 }
+      );
     }
-
+    const userId = Number(body.userId || 0);
     const target = db
       .prepare(
-        `SELECT u.id, u.username, u.email, u.full_name, u.role_id, r.slug as role_slug
+        `SELECT u.id, u.username, u.email, u.full_name, u.role_id, u.member_id, r.slug as role_slug, r.name as role_name
          FROM users u JOIN roles r ON r.id = u.role_id WHERE u.id = ?`
       )
       .get(userId) as
-      | { id: number; username: string; email: string; full_name: string; role_id: number; role_slug: string }
+      | {
+          id: number;
+          username: string;
+          email: string;
+          full_name: string;
+          role_id: number;
+          member_id: number | null;
+          role_slug: string;
+          role_name: string;
+        }
       | undefined;
     if (!target) {
       return NextResponse.json({ error: 'Akun pengguna tidak ditemukan.' }, { status: 404 });
     }
 
-    const nextRole = db.prepare('SELECT id, slug, name FROM roles WHERE id = ?').get(roleId) as
-      | { id: number; slug: string; name: string }
-      | undefined;
-    if (!nextRole) {
-      return NextResponse.json({ error: 'Peran tujuan tidak valid.' }, { status: 400 });
+    const fullName =
+      section === 'change_user_role'
+        ? target.full_name
+        : String(body.fullName || '').trim();
+    const email =
+      section === 'change_user_role'
+        ? target.email
+        : String(body.email || '').trim().toLowerCase();
+    const roleId = Number(body.roleId || 0);
+    const roleSlugParam = typeof body.roleSlug === 'string' ? body.roleSlug.trim() : '';
+
+    const nextRole = (
+      roleId
+        ? db.prepare('SELECT id, slug, name FROM roles WHERE id = ?').get(roleId)
+        : roleSlugParam
+          ? db.prepare('SELECT id, slug, name FROM roles WHERE slug = ?').get(roleSlugParam)
+          : undefined
+    ) as { id: number; slug: string; name: string } | undefined;
+
+    if (!fullName || !email || !nextRole) {
+      return NextResponse.json({ error: 'Data pengguna dan peran tujuan wajib lengkap.' }, { status: 400 });
     }
 
     if (target.id === auth.id && target.role_slug === 'super_admin' && nextRole.slug !== 'super_admin') {
@@ -616,24 +696,177 @@ export async function PUT(req: NextRequest) {
     }
 
     const emailDup = db
-      .prepare('SELECT id FROM users WHERE email = ? AND id != ?')
-      .get(email, userId);
+      .prepare('SELECT id FROM users WHERE lower(email) = ? AND id != ?')
+      .get(email.toLowerCase(), userId);
     if (emailDup) {
       return NextResponse.json({ error: 'Email sudah digunakan oleh akun lain.' }, { status: 409 });
     }
 
+    const prefix = getSettingsMap(db).member_code_prefix || 'AGT-2026-';
     db.transaction(() => {
+      let memberId = target.member_id;
+      if (!memberId && nextRole.slug !== 'super_admin' && nextRole.slug !== 'pengunjung') {
+        memberId = ensureMemberRecordForUser(db, {
+          fullName,
+          email,
+          roleSlug: nextRole.slug,
+          roleName: nextRole.name,
+          memberCodePrefix: prefix,
+        });
+      }
+
       db.prepare(
-        `UPDATE users SET full_name = ?, email = ?, role_id = ?, updated_at = datetime('now') WHERE id = ?`
-      ).run(fullName, email, roleId, userId);
+        `UPDATE users SET full_name = ?, email = ?, role_id = ?, member_id = ?, updated_at = datetime('now') WHERE id = ?`
+      ).run(fullName, email, nextRole.id, memberId, userId);
+
       logAudit(db, {
         userId: auth.id,
         userName: auth.fullName,
-        action: 'USER_UPDATE',
+        action: section === 'change_user_role' ? 'USER_ROLE_CHANGE' : 'USER_UPDATE',
         entityType: 'user',
         entityId: String(userId),
-        before: { fullName: target.full_name, email: target.email, roleId: target.role_id },
-        after: { fullName, email, roleId, roleName: nextRole.name },
+        before: {
+          fullName: target.full_name,
+          email: target.email,
+          roleId: target.role_id,
+          roleSlug: target.role_slug,
+          roleName: target.role_name,
+        },
+        after: {
+          fullName,
+          email,
+          roleId: nextRole.id,
+          roleSlug: nextRole.slug,
+          roleName: nextRole.name,
+        },
+      });
+    })();
+    return NextResponse.json({ ok: true });
+  }
+
+  // 9b. Approve pending sign-up user (Super Admin only)
+  if (section === 'approve_user') {
+    if (!isSuperAdmin) {
+      return NextResponse.json(
+        { error: 'Hanya Super Admin yang dapat menyetujui pendaftaran akun.' },
+        { status: 403 }
+      );
+    }
+    const userId = Number(body.userId || 0);
+    const note = String(body.note || '').trim().slice(0, 240);
+    const target = db
+      .prepare(
+        `SELECT u.id, u.username, u.email, u.full_name, u.role_id, u.requested_role_id, u.member_id, u.approval_status,
+                r.slug as role_slug, r.name as role_name
+         FROM users u JOIN roles r ON r.id = u.role_id WHERE u.id = ?`
+      )
+      .get(userId) as
+      | {
+          id: number;
+          username: string;
+          email: string;
+          full_name: string;
+          role_id: number;
+          requested_role_id: number | null;
+          member_id: number | null;
+          approval_status: string;
+          role_slug: string;
+          role_name: string;
+        }
+      | undefined;
+
+    if (!target) {
+      return NextResponse.json({ error: 'Akun pengguna tidak ditemukan.' }, { status: 404 });
+    }
+
+    const overrideRoleId = body.roleId ? Number(body.roleId) : target.requested_role_id || target.role_id;
+    const finalRole = db.prepare('SELECT id, slug, name FROM roles WHERE id = ?').get(overrideRoleId) as
+      | { id: number; slug: string; name: string }
+      | undefined;
+    if (!finalRole) {
+      return NextResponse.json({ error: 'Peran persetujuan tidak valid.' }, { status: 400 });
+    }
+
+    const prefix = getSettingsMap(db).member_code_prefix || 'AGT-2026-';
+    db.transaction(() => {
+      let memberId = target.member_id;
+      if (!memberId && finalRole.slug !== 'super_admin' && finalRole.slug !== 'pengunjung') {
+        memberId = ensureMemberRecordForUser(db, {
+          fullName: target.full_name,
+          email: target.email,
+          roleSlug: finalRole.slug,
+          roleName: finalRole.name,
+          memberCodePrefix: prefix,
+        });
+      }
+
+      db.prepare(
+        `UPDATE users
+         SET role_id = ?, member_id = ?, is_active = 1, approval_status = 'approved',
+             approval_note = ?, approved_by_user_id = ?, approved_at = datetime('now'),
+             updated_at = datetime('now')
+         WHERE id = ?`
+      ).run(finalRole.id, memberId, note, auth.id, userId);
+
+      db.prepare(
+        `INSERT INTO notifications (user_id, type, title, message, link)
+         VALUES (?, 'success', 'Akun Disetujui Super Admin', ?, '/catalog')`
+      ).run(
+        userId,
+        `Akun Anda telah disetujui oleh Super Admin sebagai "${finalRole.name}" dan sekarang aktif.`
+      );
+
+      logAudit(db, {
+        userId: auth.id,
+        userName: auth.fullName,
+        action: 'USER_APPROVE',
+        entityType: 'user',
+        entityId: String(userId),
+        before: { approvalStatus: target.approval_status, roleSlug: target.role_slug },
+        after: { approvalStatus: 'approved', roleSlug: finalRole.slug, roleName: finalRole.name, note },
+      });
+    })();
+    return NextResponse.json({ ok: true });
+  }
+
+  // 9c. Reject pending sign-up user (Super Admin only)
+  if (section === 'reject_user') {
+    if (!isSuperAdmin) {
+      return NextResponse.json(
+        { error: 'Hanya Super Admin yang dapat menolak pendaftaran akun.' },
+        { status: 403 }
+      );
+    }
+    const userId = Number(body.userId || 0);
+    const note = String(body.note || '').trim().slice(0, 240);
+    if (userId === auth.id) {
+      return NextResponse.json({ error: 'Tidak dapat menolak akun sendiri.' }, { status: 400 });
+    }
+    const target = db
+      .prepare('SELECT id, username, full_name, approval_status FROM users WHERE id = ?')
+      .get(userId) as
+      | { id: number; username: string; full_name: string; approval_status: string }
+      | undefined;
+    if (!target) {
+      return NextResponse.json({ error: 'Akun pengguna tidak ditemukan.' }, { status: 404 });
+    }
+
+    db.transaction(() => {
+      db.prepare(
+        `UPDATE users
+         SET is_active = 0, approval_status = 'rejected', approval_note = ?,
+             approved_by_user_id = ?, approved_at = datetime('now'), updated_at = datetime('now')
+         WHERE id = ?`
+      ).run(note, auth.id, userId);
+
+      logAudit(db, {
+        userId: auth.id,
+        userName: auth.fullName,
+        action: 'USER_REJECT',
+        entityType: 'user',
+        entityId: String(userId),
+        before: { approvalStatus: target.approval_status },
+        after: { approvalStatus: 'rejected', note },
       });
     })();
     return NextResponse.json({ ok: true });

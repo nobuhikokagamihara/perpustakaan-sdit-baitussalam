@@ -13,11 +13,18 @@ export async function GET(
 
   const { id } = await context.params;
   const memberId = Number(id);
+  if (!Number.isFinite(memberId) || memberId <= 0) {
+    return NextResponse.json({ error: 'ID anggota tidak valid.' }, { status: 400 });
+  }
   const db = getDb();
 
   const member = db
     .prepare(
-      `SELECT m.*, mt.name as membership_type_name, mt.max_loans, mt.loan_duration_days, mt.max_renewals, mt.daily_fine_rate
+      `SELECT m.*, mt.name as membership_type_name, mt.max_loans, mt.loan_duration_days, mt.max_renewals, mt.daily_fine_rate,
+              (SELECT COUNT(*) FROM loan_items li JOIN loans l ON l.id = li.loan_id
+               WHERE l.member_id = m.id AND li.returned_at IS NULL) as active_loans_count,
+              (SELECT COALESCE(SUM(f.amount - f.paid_amount - f.waived_amount), 0)
+               FROM fines f WHERE f.member_id = m.id AND f.status IN ('Belum Lunas', 'Sebagian')) as unpaid_fines_total
        FROM members m
        JOIN membership_types mt ON mt.id = m.membership_type_id
        WHERE m.id = ?`
@@ -69,28 +76,40 @@ export async function PUT(
   req: NextRequest,
   context: { params: Promise<{ id: string }> }
 ) {
-  const guard = await requirePermission('members.write');
-  if (guard.errorResponse) return guard.errorResponse;
-
   const { id } = await context.params;
   const memberId = Number(id);
-  const body = await req.json();
+  if (!Number.isFinite(memberId) || memberId <= 0) {
+    return NextResponse.json({ error: 'ID anggota tidak valid.' }, { status: 400 });
+  }
+
+  let body: Record<string, unknown>;
+  try {
+    body = (await req.json()) as Record<string, unknown>;
+  } catch {
+    return NextResponse.json({ error: 'Format JSON tidak valid.' }, { status: 400 });
+  }
+
+  const isBlockAction =
+    body.action === 'block' || body.action === 'unblock' || body.action === 'deactivate';
+  const guard = await requirePermission(isBlockAction ? 'members.block' : 'members.write');
+  if (guard.errorResponse) return guard.errorResponse;
+
   const db = getDb();
 
   const before = db.prepare('SELECT * FROM members WHERE id = ?').get(memberId) as
-    | { id: number; expires_at: string; status: string }
+    | { id: number; expires_at: string; status: string; archived_at?: string | null }
     | undefined;
   if (!before) {
     return NextResponse.json({ error: 'Anggota tidak ditemukan.' }, { status: 404 });
   }
 
-  if (body.action === 'block' || body.action === 'unblock' || body.action === 'deactivate') {
-    const blockGuard = await requirePermission('members.block');
-    if (blockGuard.errorResponse) return blockGuard.errorResponse;
-
+  if (isBlockAction) {
     const newStatus =
       body.action === 'block' ? 'Diblokir' : body.action === 'deactivate' ? 'Nonaktif' : 'Aktif';
-    const blockReason = body.action === 'block' ? String(body.reason || 'Diblokir oleh petugas') : '';
+    const blockReason =
+      body.action === 'block'
+        ? String(body.reason || '').trim() || 'Diblokir oleh petugas'
+        : '';
 
     db.transaction(() => {
       db.prepare(
@@ -100,7 +119,7 @@ export async function PUT(
       logAudit(db, {
         userId: guard.user.id,
         userName: guard.user.fullName,
-        action: `MEMBER_${body.action.toUpperCase()}`,
+        action: `MEMBER_${String(body.action).toUpperCase()}`,
         entityType: 'members',
         entityId: memberId,
         before,
@@ -109,6 +128,24 @@ export async function PUT(
     })();
 
     return NextResponse.json({ ok: true, status: newStatus });
+  }
+
+  if (body.action === 'restore') {
+    db.transaction(() => {
+      db.prepare(
+        `UPDATE members SET archived_at = NULL, status = 'Aktif', block_reason = '', updated_at = datetime('now') WHERE id = ?`
+      ).run(memberId);
+      logAudit(db, {
+        userId: guard.user.id,
+        userName: guard.user.fullName,
+        action: 'MEMBER_RESTORE',
+        entityType: 'members',
+        entityId: memberId,
+        before,
+        after: { status: 'Aktif', archived_at: null },
+      });
+    })();
+    return NextResponse.json({ ok: true, status: 'Aktif' });
   }
 
   if (body.action === 'extend') {
@@ -171,9 +208,17 @@ export async function PUT(
   }
 
   const fullName = String(body.fullName || '').trim();
+  const membershipTypeId = Number(body.membershipTypeId || 1);
   if (!fullName) {
     return NextResponse.json({ error: 'Nama lengkap wajib diisi.' }, { status: 400 });
   }
+  const mTypeExists = db
+    .prepare('SELECT id FROM membership_types WHERE id = ?')
+    .get(membershipTypeId);
+  if (!mTypeExists) {
+    return NextResponse.json({ error: 'Jenis keanggotaan tidak valid.' }, { status: 400 });
+  }
+  const nextExpiresAt = body.expiresAt ? String(body.expiresAt).trim() : before.expires_at;
 
   db.transaction(() => {
     db.prepare(
@@ -184,14 +229,14 @@ export async function PUT(
        WHERE id = ?`
     ).run(
       fullName,
-      Number(body.membershipTypeId || 1),
-      String(body.identityNumber || ''),
+      membershipTypeId,
+      String(body.identityNumber || '').trim(),
       String(body.gender || 'Tidak Disebutkan'),
-      String(body.unitOrClass || ''),
-      String(body.address || ''),
-      String(body.phone || ''),
-      String(body.email || ''),
-      String(body.expiresAt || before.expires_at),
+      String(body.unitOrClass || '').trim(),
+      String(body.address || '').trim(),
+      String(body.phone || '').trim(),
+      String(body.email || '').trim(),
+      nextExpiresAt,
       memberId
     );
 
@@ -202,7 +247,12 @@ export async function PUT(
       entityType: 'members',
       entityId: memberId,
       before,
-      after: { fullName },
+      after: {
+        fullName,
+        membershipTypeId,
+        unitOrClass: String(body.unitOrClass || '').trim(),
+        expiresAt: nextExpiresAt,
+      },
     });
   })();
 

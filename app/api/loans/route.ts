@@ -5,6 +5,7 @@ import { logAudit } from '@/lib/db/audit';
 import {
   calculateDueDate,
   formatIsoDate,
+  hasPermission,
   validateLoanEligibility,
   type CopyStatus,
   type MemberStatus,
@@ -35,8 +36,13 @@ export async function GET(req: NextRequest) {
 
   const policy = extractCirculationPolicy(getSettingsMap(db));
 
-  // Scope Anggota strictly to own loans
-  if (guard.user.roleSlug === 'anggota') {
+  // Scope non-circulation members strictly to own loans
+  const canViewAllLoans =
+    hasPermission(guard.user.permissions, 'loans.write') ||
+    hasPermission(guard.user.permissions, 'members.read') ||
+    hasPermission(guard.user.permissions, 'dashboard.view');
+
+  if (!canViewAllLoans) {
     if (!guard.user.memberId) {
       return NextResponse.json({
         loans: [],
