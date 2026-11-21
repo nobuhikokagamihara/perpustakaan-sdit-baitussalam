@@ -53,16 +53,37 @@ import {
   type MemberStatus,
 } from '@/lib/domain/library-rules';
 import {
+  computeCirculationSummary,
+  doesAcquisitionTextMatchClass,
+  doesTargetGradeMatchClass,
+  getReportCategoryFilterHint,
+  getReportClassFilterHint,
+  isCirculationReportType,
+  matchesExactClass,
+  normalizeClassFilter,
+  type CirculationCategoryBreakdownItem,
+} from '@/lib/domain/report-filters';
+import {
+  canApproverAssignRole,
+  canRoleApproveRegistrations,
+  isPlaceholderTeacherName,
+  normalizeTeacherDisplay,
+  resolveMembershipTypeCodeForSignup,
+  type PublicClassOption,
+} from '@/lib/domain/signup-rules';
+import {
   ALL_BACKUP_TABLES,
   ALL_STANDARD_PERMISSIONS,
   BACKUP_MODULES,
   DEFAULT_SYSTEM_SETTINGS,
+  PURGEABLE_FIRESTORE_COLLECTIONS,
   SCHOOL_ROLE_CATALOG,
   SCHOOL_ROLE_MAP,
   SYSTEM_ROLE_SLUGS,
   buildBackupEnvelope,
   computeRestoreDiff,
   evaluateBackupHealth,
+  evaluatePurgeBackupPrerequisite,
   extractCirculationPolicy,
   guardSuperAdminLockout,
   isStaffOperationalPermissions,
@@ -71,6 +92,7 @@ import {
   validateBackupEnvelope,
   validateCustomRoleInput,
   validateMembershipPolicyInput,
+  validatePurgeAllDataRequest,
   type BackupModuleId,
 } from '@/lib/domain/settings-backup-rules';
 import {
@@ -79,15 +101,18 @@ import {
   SCHEDULE_STATUSES,
   SD_CLASSES,
   buildAutoClassScheduleSlots,
+  compareClassNames,
   computeClassAttendanceRecap,
   computeClassCoverage,
   computeScheduleSummary,
   detectScheduleConflict,
   extractGradeLevel,
   getClassPreset,
+  parseBulkStudentLines,
   summarizeSessionAttendance,
   validateAttendanceEntries,
   validateCompletionLog,
+  validateRombelPayload,
   validateSchedulePayload,
   validateStudentPayload,
   type AttendanceRecordItem,
@@ -95,6 +120,7 @@ import {
   type ClassStudentRecord,
   type ReadingScheduleRecord,
   type ScheduleStatus,
+  type SdClassPreset,
 } from '@/lib/domain/reading-schedule-rules';
 import {
   generateCallNumber,
@@ -1275,12 +1301,14 @@ async function dispatchFirestoreApiInner(
     const q = (searchParams.get('q') || '').trim().toLowerCase();
     const statusFilter = searchParams.get('status') || '';
     const typeIdFilter = searchParams.get('typeId') || '';
+    const classNameFilter = (searchParams.get('className') || '').trim().toLowerCase();
     const archivedMode = searchParams.get('archived') || 'exclude';
-    const [members, mTypes, loans, fines] = await Promise.all([
+    const [members, mTypes, loans, fines, rawSchoolClasses] = await Promise.all([
       listCollection('members', [where('archived', '==', archivedMode === 'only')]),
       listCollection('membership_types'),
       listCollection('loans'),
       listCollection('fines'),
+      listCollection('school_classes'),
     ]);
 
     const mTypeMap = new Map(mTypes.map((mt) => [mt.id, mt]));
@@ -1326,6 +1354,7 @@ async function dispatchFirestoreApiInner(
       .filter((m) => {
         if (statusFilter && m.status !== statusFilter) return false;
         if (typeIdFilter && String(m.membership_type_id) !== typeIdFilter) return false;
+        if (classNameFilter && m.unit_or_class.trim().toLowerCase() !== classNameFilter) return false;
         if (!q) return true;
         return (
           m.member_code.toLowerCase().includes(q) ||
@@ -1336,11 +1365,32 @@ async function dispatchFirestoreApiInner(
       })
       .sort((a, b) => b.id - a.id);
 
+    const activeClassesSource =
+      rawSchoolClasses.length > 0
+        ? rawSchoolClasses
+            .filter((c) => !c.archived)
+            .map((c) => ({
+              className: String(c.className || ''),
+              gradeLevel: Number(c.gradeLevel || 1),
+              homeroomTeacher: String(c.homeroomTeacher || ''),
+              companionTeacher: String(c.companionTeacher || ''),
+              roomLabel: String(c.roomLabel || ''),
+            }))
+        : SD_CLASSES.map((c) => ({
+            className: c.className,
+            gradeLevel: c.gradeLevel,
+            homeroomTeacher: c.homeroomTeacher,
+            companionTeacher: c.companionTeacher,
+            roomLabel: '',
+          }));
+    activeClassesSource.sort((a, b) => compareClassNames(a.className, b.className));
+
     return jsonRes({
       members: rows,
       membershipTypes: mTypes
         .sort((a, b) => Number(a.numericId) - Number(b.numericId))
         .map((mt) => ({ id: Number(mt.numericId), docId: mt.id, name: String(mt.name) })),
+      schoolClasses: activeClassesSource,
     });
   }
 
@@ -3096,157 +3146,595 @@ async function dispatchFirestoreApiInner(
     const fromDate = searchParams.get('fromDate') || '2026-01-01';
     const toDate = searchParams.get('toDate') || '2026-12-31';
     const catFilter = searchParams.get('categoryId') || '';
+    const className = normalizeClassFilter(searchParams.get('className'));
 
-    const [books, copies, members, loans, returns, fines, payments, acquisitions, categories] =
-      await Promise.all([
-        listCollection('books', [where('archived', '==', false)]),
-        listCollection('book_copies', [where('archived', '==', false)]),
-        listCollection('members', [where('archived', '==', false)]),
-        listCollection('loans'),
-        listCollection('returns'),
-        listCollection('fines'),
-        listCollection('payments'),
-        listCollection('acquisitions'),
-        listCategories(),
-      ]);
+    const [
+      books,
+      copies,
+      members,
+      loans,
+      returns,
+      fines,
+      payments,
+      acquisitions,
+      categories,
+      rawClassDocs,
+    ] = await Promise.all([
+      listCollection('books', [where('archived', '==', false)]),
+      listCollection('book_copies', [where('archived', '==', false)]),
+      listCollection('members', [where('archived', '==', false)]),
+      listCollection('loans'),
+      listCollection('returns'),
+      listCollection('fines'),
+      listCollection('payments'),
+      listCollection('acquisitions'),
+      listCategories(),
+      listCollection('school_classes'),
+    ]);
+
+    const activeClasses = (
+      rawClassDocs.length > 0
+        ? rawClassDocs.filter((c) => !c.archived)
+        : SEED_SCHOOL_CLASSES.map((sc) => ({ ...sc } as unknown as FsDoc))
+    ).sort((a, b) => compareClassNames(String(a.className || ''), String(b.className || '')));
+
+    const schoolClasses = activeClasses.map((c) => ({
+      className: String(c.className || ''),
+      gradeLevel: Number(c.gradeLevel || 1),
+      homeroomTeacher: String(c.homeroomTeacher || ''),
+      companionTeacher: String(c.companionTeacher || ''),
+      roomLabel: String(c.roomLabel || ''),
+    }));
+
+    const rombelKeys = new Set(schoolClasses.map((c) => c.className.trim().toLowerCase()));
+    const otherUnits = Array.from(
+      new Set(
+        members
+          .map((m) => String(m.unitOrClass || '').trim())
+          .filter((u) => u && !rombelKeys.has(u.toLowerCase()))
+      )
+    ).sort((a, b) => a.localeCompare(b, 'id'));
+
+    const memberById = new Map(members.map((m) => [String(m.id), m]));
+    const bookById = new Map(books.map((b) => [String(b.id), b]));
+    const copyById = new Map(copies.map((c) => [String(c.id), c]));
+
+    const getMemberClass = (memberId: unknown): string => {
+      const m = memberById.get(String(memberId || ''));
+      return String(m?.unitOrClass || '').trim();
+    };
+
+    const matchesCategory = (bookId: unknown): boolean => {
+      if (!catFilter) return true;
+      const b = bookById.get(String(bookId || ''));
+      if (!b) return false;
+      return String(b.categoryId) === `cat_${catFilter}` || String(b.categoryId) === catFilter;
+    };
 
     const filteredBooks = catFilter
-      ? books.filter((b) => String(b.categoryId) === `cat_${catFilter}` || b.categoryId === catFilter)
+      ? books.filter((b) => String(b.categoryId) === `cat_${catFilter}` || String(b.categoryId) === catFilter)
       : books;
 
+    const classLoans = className
+      ? loans.filter((l) => matchesExactClass(getMemberClass(l.memberId), className))
+      : loans;
+
+    const classBorrowedCopyIds = new Set<string>();
+    const classBorrowCountByBook = new Map<string, number>();
+    for (const l of classLoans) {
+      const lDate = String(l.loanDate || '');
+      const inRange = !lDate || (lDate >= fromDate && lDate <= toDate);
+      for (const it of (l.items as Array<Record<string, unknown>>) || []) {
+        const copyId = String(it.copyId || '');
+        if (copyId) classBorrowedCopyIds.add(copyId);
+        const cDoc = copyById.get(copyId);
+        const bId = String(it.bookId || cDoc?.bookId || '');
+        if (bId && inRange) {
+          classBorrowCountByBook.set(bId, (classBorrowCountByBook.get(bId) || 0) + 1);
+        }
+      }
+    }
+
+    const categoryById = new Map(categories.map((c) => [String(c.id), c]));
+    const categoryByNumeric = new Map(categories.map((c) => [String(c.numericId), c]));
+
+    const resolveBookCategory = (bookId: unknown): { numericId: number | null; name: string } => {
+      const b = bookById.get(String(bookId || ''));
+      if (!b) return { numericId: null, name: 'Umum' };
+      const cDoc =
+        categoryById.get(String(b.categoryId || '')) ||
+        categoryByNumeric.get(String(b.categoryId || '').replace(/^cat_/, ''));
+      const numericId = cDoc && Number.isFinite(Number(cDoc.numericId)) ? Number(cDoc.numericId) : null;
+      const name = String(cDoc?.name || b.categoryName || 'Umum');
+      return { numericId, name };
+    };
+
+    const selectedCategoryDoc = catFilter
+      ? categories.find((c) => String(c.numericId) === catFilter || String(c.id) === `cat_${catFilter}` || String(c.id) === catFilter)
+      : null;
+    const selectedCategoryName = selectedCategoryDoc ? String(selectedCategoryDoc.name || '') : '';
+
+    const returnByLoanCopy = new Map<string, FsDoc>();
+    for (const r of returns) {
+      const key = `${String(r.loanId || '')}::${String(r.copyId || '')}`;
+      returnByLoanCopy.set(key, r);
+    }
+
     let rows: Array<Record<string, unknown>> = [];
-    if (type === 'loans') {
-      rows = loans
-        .filter((l) => String(l.loanDate) >= fromDate && String(l.loanDate) <= toDate)
-        .map((l) => ({
-          No_Pinjam: l.loanNumber,
-          Anggota: l.memberName,
-          Tanggal_Pinjam: l.loanDate,
-          Jatuh_Tempo: l.dueDate,
-          Jumlah_Buku: Array.isArray(l.items) ? l.items.length : 1,
-          Status: l.status,
-        }));
+    if (type === 'circulation') {
+      for (const l of classLoans) {
+        const lDate = String(l.loanDate || '');
+        if (lDate < fromDate || lDate > toDate) continue;
+        const mClass = getMemberClass(l.memberId) || '-';
+        const items = (l.items as Array<Record<string, unknown>>) || [];
+        for (const it of items) {
+          const copyId = String(it.copyId || '');
+          const cDoc = copyById.get(copyId);
+          const bookId = String(it.bookId || cDoc?.bookId || '');
+          if (!matchesCategory(bookId)) continue;
+          const bDoc = bookById.get(bookId);
+          const catInfo = resolveBookCategory(bookId);
+          const ret = returnByLoanCopy.get(`${String(l.id)}::${copyId}`);
+          const dueDate = String(it.dueDate || l.dueDate || '');
+          const returnedAtRaw = String(ret?.returnedAt || it.returnedAt || '');
+          const returnedAt = returnedAtRaw ? returnedAtRaw.slice(0, 10) : '-';
+          let statusLabel = 'Dipinjam';
+          if (ret) {
+            statusLabel = String(ret.status || '') === 'Terlambat' ? 'Dikembalikan (Terlambat)' : 'Dikembalikan';
+          } else if (it.returnedAt) {
+            statusLabel = 'Dikembalikan';
+          } else if (String(l.status || '') === 'Terlambat' || (dueDate && dueDate < todayStr)) {
+            statusLabel = 'Terlambat';
+          }
+          rows.push({
+            No_Transaksi: l.loanNumber,
+            Anggota: l.memberName,
+            Rombel_Kelas: mClass,
+            Judul_Buku: String(it.bookTitle || bDoc?.title || '-'),
+            Kategori_Buku: catInfo.name,
+            Kode_Eksemplar: String(it.inventoryCode || cDoc?.inventoryCode || '-'),
+            Tanggal_Pinjam: lDate,
+            Jatuh_Tempo: dueDate,
+            Tanggal_Kembali: returnedAt,
+            Status: statusLabel,
+            Denda: Number(ret?.fineAmount || 0),
+          });
+        }
+      }
+      rows.sort((a, b) => String(b.Tanggal_Pinjam || '').localeCompare(String(a.Tanggal_Pinjam || '')));
+    } else if (type === 'loans') {
+      rows = classLoans
+        .filter((l) => {
+          const lDate = String(l.loanDate || '');
+          if (lDate < fromDate || lDate > toDate) return false;
+          if (!catFilter) return true;
+          const items = (l.items as Array<Record<string, unknown>>) || [];
+          return items.some((it) => {
+            const cDoc = copyById.get(String(it.copyId || ''));
+            return matchesCategory(it.bookId || cDoc?.bookId);
+          });
+        })
+        .map((l) => {
+          const allItems = (l.items as Array<Record<string, unknown>>) || [];
+          const matchingItems = catFilter
+            ? allItems.filter((it) => {
+                const cDoc = copyById.get(String(it.copyId || ''));
+                return matchesCategory(it.bookId || cDoc?.bookId);
+              })
+            : allItems;
+          const catNames = Array.from(
+            new Set(
+              matchingItems.map((it) => {
+                const cDoc = copyById.get(String(it.copyId || ''));
+                return resolveBookCategory(it.bookId || cDoc?.bookId).name;
+              })
+            )
+          );
+          return {
+            No_Transaksi: l.loanNumber,
+            Nama_Anggota: l.memberName,
+            Rombel_Kelas: getMemberClass(l.memberId) || '-',
+            Kategori_Buku: catNames.join(', ') || 'Umum',
+            Tanggal_Pinjam: l.loanDate,
+            Jatuh_Tempo: l.dueDate,
+            Jumlah_Buku: matchingItems.length || 1,
+            Status: l.status,
+          };
+        });
     } else if (type === 'returns') {
+      const loanById = new Map(loans.map((l) => [String(l.id), l]));
       rows = returns
-        .filter((r) => String(r.returnedAt) >= fromDate && String(r.returnedAt) <= toDate)
-        .map((r) => ({
-          No_Kembali: r.returnNumber,
-          No_Pinjam: r.loanNumber,
-          Anggota: r.memberName,
-          Judul_Buku: r.bookTitle,
-          Tanggal_Kembali: r.returnedAt,
-          Kondisi: r.condition,
-          Denda: r.fineAmount,
-          Status: r.status,
-        }));
+        .filter((r) => {
+          const rDate = String(r.returnedAt || '').slice(0, 10);
+          if (rDate < fromDate || rDate > toDate) return false;
+          const parentLoan = loanById.get(String(r.loanId || ''));
+          const mClass = getMemberClass(r.memberId || parentLoan?.memberId);
+          if (className && !matchesExactClass(mClass, className)) return false;
+          const cDoc = copyById.get(String(r.copyId || ''));
+          if (!matchesCategory(r.bookId || cDoc?.bookId)) return false;
+          return true;
+        })
+        .map((r) => {
+          const parentLoan = loanById.get(String(r.loanId || ''));
+          const mClass = getMemberClass(r.memberId || parentLoan?.memberId);
+          const cDoc = copyById.get(String(r.copyId || ''));
+          const catInfo = resolveBookCategory(r.bookId || cDoc?.bookId);
+          return {
+            No_Pengembalian: r.returnNumber,
+            No_Peminjaman: r.loanNumber,
+            Anggota: r.memberName,
+            Rombel_Kelas: mClass || '-',
+            Judul_Buku: r.bookTitle,
+            Kategori_Buku: catInfo.name,
+            Tanggal_Kembali: r.returnedAt,
+            Kondisi: r.condition,
+            Denda: r.fineAmount,
+            Status: r.status,
+          };
+        });
     } else if (type === 'overdue') {
-      for (const l of loans) {
+      for (const l of classLoans) {
+        const mClass = getMemberClass(l.memberId);
         for (const it of (l.items as Array<Record<string, unknown>>) || []) {
+          const cDoc = copyById.get(String(it.copyId || ''));
+          const bId = it.bookId || cDoc?.bookId;
+          if (!matchesCategory(bId)) continue;
           if (!it.returnedAt && String(it.dueDate || l.dueDate) < todayStr) {
             rows.push({
-              No_Pinjam: l.loanNumber,
-              Anggota: l.memberName,
+              No_Transaksi: l.loanNumber,
+              Nama_Anggota: l.memberName,
+              Rombel_Kelas: mClass || '-',
               Judul_Buku: it.bookTitle,
+              Kategori_Buku: resolveBookCategory(bId).name,
               Kode_Eksemplar: it.inventoryCode,
               Jatuh_Tempo: it.dueDate,
+              Status: 'Terlambat',
             });
           }
         }
       }
     } else if (type === 'collection' || type === 'available') {
-      rows = filteredBooks.map((b) => {
-        const bCopies = copies.filter((c) => c.bookId === b.id);
-        const avail = bCopies.filter((c) => c.status === 'Tersedia').length;
-        return {
-          Judul: b.title,
-          ISBN: b.isbn,
-          Kategori: b.categoryName,
-          Total_Eksemplar: bCopies.length,
-          Tersedia: avail,
-        };
-      }).filter((r) => (type === 'available' ? r.Tersedia > 0 : true));
+      const matchingBooks = className
+        ? filteredBooks.filter(
+            (b) =>
+              doesTargetGradeMatchClass(String(b.targetGrade || 'Semua Kelas (1–6 SD)'), className) ||
+              classBorrowCountByBook.has(String(b.id))
+          )
+        : filteredBooks;
+
+      rows = matchingBooks
+        .map((b) => {
+          const bCopies = copies.filter((c) => c.bookId === b.id);
+          const avail = bCopies.filter((c) => c.status === 'Tersedia').length;
+          const base: Record<string, unknown> = {
+            Judul: b.title,
+            ISBN: b.isbn || '-',
+            Kategori: b.categoryName,
+            Target_Kelas: String(b.targetGrade || 'Semua Kelas (1–6 SD)'),
+            Total_Eksemplar: bCopies.length,
+            Tersedia: avail,
+          };
+          if (className) {
+            base.Dipinjam_Rombel = classBorrowCountByBook.get(String(b.id)) || 0;
+          }
+          return base;
+        })
+        .filter((r) => (type === 'available' ? Number(r.Tersedia) > 0 : true));
     } else if (type === 'active_members') {
       rows = members
-        .filter((m) => m.status === 'Aktif')
+        .filter((m) => m.status === 'Aktif' && matchesExactClass(String(m.unitOrClass || ''), className))
         .map((m) => ({
-          Nomor_Anggota: m.memberCode,
+          No_Anggota: m.memberCode,
           Nama: m.fullName,
           Jenis: m.membershipTypeName,
-          Kelas_Unit: m.unitOrClass,
+          Unit_Kelas: m.unitOrClass || '-',
           Berlaku_Hingga: m.expiresAt,
         }));
     } else if (type === 'most_active_members') {
       rows = members
+        .filter((m) => m.status === 'Aktif' && matchesExactClass(String(m.unitOrClass || ''), className))
         .map((m) => ({
-          Nomor_Anggota: m.memberCode,
+          No_Anggota: m.memberCode,
           Nama: m.fullName,
-          Total_Pinjaman: loans.filter((l) => l.memberId === m.id).length,
+          Unit_Kelas: m.unitOrClass || '-',
+          Total_Transaksi: loans.filter((l) => l.memberId === m.id).length,
         }))
-        .sort((a, b) => b.Total_Pinjaman - a.Total_Pinjaman);
+        .sort((a, b) => b.Total_Transaksi - a.Total_Transaksi);
     } else if (type === 'popular_books') {
-      rows = [...filteredBooks]
-        .sort((a, b) => Number(b.borrowCount || 0) - Number(a.borrowCount || 0))
-        .map((b) => ({
-          Judul: b.title,
-          Kategori: b.categoryName,
-          Total_Dipinjam: Number(b.borrowCount || 0),
-        }));
+      if (className) {
+        rows = filteredBooks
+          .map((b) => ({
+            Judul: b.title,
+            Kategori: b.categoryName,
+            Rombel_Kelas: className,
+            Total_Dipinjam: classBorrowCountByBook.get(String(b.id)) || 0,
+          }))
+          .filter((r) => r.Total_Dipinjam > 0)
+          .sort((a, b) => b.Total_Dipinjam - a.Total_Dipinjam);
+      } else {
+        rows = [...filteredBooks]
+          .sort((a, b) => Number(b.borrowCount || 0) - Number(a.borrowCount || 0))
+          .map((b) => ({
+            Judul: b.title,
+            Kategori: b.categoryName,
+            Total_Dipinjam: Number(b.borrowCount || 0),
+          }));
+      }
     } else if (type === 'popular_categories') {
-      rows = categories.map((c) => ({
-        Kategori: c.name,
-        Jumlah_Judul: books.filter((b) => b.categoryId === c.id).length,
-        Total_Dipinjam: books
-          .filter((b) => b.categoryId === c.id)
-          .reduce((s, b) => s + Number(b.borrowCount || 0), 0),
-      }));
+      const targetCats = catFilter
+        ? categories.filter((c) => String(c.id) === `cat_${catFilter}` || String(c.numericId) === catFilter)
+        : categories;
+
+      if (className) {
+        rows = targetCats
+          .map((c) => {
+            const catBooks = books.filter((b) => b.categoryId === c.id);
+            const totalForClass = catBooks.reduce(
+              (sum, b) => sum + (classBorrowCountByBook.get(String(b.id)) || 0),
+              0
+            );
+            return {
+              Kategori: c.name,
+              Rombel_Kelas: className,
+              Jumlah_Judul: catBooks.length,
+              Total_Peminjaman: totalForClass,
+            };
+          })
+          .sort((a, b) => b.Total_Peminjaman - a.Total_Peminjaman);
+      } else {
+        rows = targetCats
+          .map((c) => ({
+            Kategori: c.name,
+            Jumlah_Judul: books.filter((b) => b.categoryId === c.id).length,
+            Total_Peminjaman: books
+              .filter((b) => b.categoryId === c.id)
+              .reduce((s, b) => s + Number(b.borrowCount || 0), 0),
+          }))
+          .sort((a, b) => b.Total_Peminjaman - a.Total_Peminjaman);
+      }
     } else if (type === 'fines') {
-      rows = fines.map((f) => ({
-        No_Denda: f.fineNumber,
-        Anggota: f.memberName,
-        Jenis: f.fineType,
-        Tagihan: f.amount,
-        Dibayar: f.paidAmount,
-        Status: f.status,
-      }));
+      rows = fines
+        .filter((f) => {
+          const fDate = tsToIso(f.createdAt).slice(0, 10);
+          if (fDate && (fDate < fromDate || fDate > toDate)) return false;
+          return matchesExactClass(getMemberClass(f.memberId), className);
+        })
+        .map((f) => ({
+          No_Denda: f.fineNumber,
+          Anggota: f.memberName,
+          Rombel_Kelas: getMemberClass(f.memberId) || '-',
+          Jenis_Denda: f.fineType,
+          Tagihan: f.amount,
+          Dibayar: f.paidAmount,
+          Status: f.status,
+        }));
     } else if (type === 'payments') {
-      rows = payments.map((p) => ({
-        No_Bayar: p.paymentNumber,
-        No_Denda: p.fineNumber,
-        Anggota: p.memberName,
-        Nominal: p.amount,
-        Metode: p.method,
-        Tanggal: p.paidAt,
-      }));
+      rows = payments
+        .filter((p) => {
+          const pDate = String(p.paidAt || '').slice(0, 10);
+          if (pDate && (pDate < fromDate || pDate > toDate)) return false;
+          return matchesExactClass(getMemberClass(p.memberId), className);
+        })
+        .map((p) => ({
+          No_Pembayaran: p.paymentNumber,
+          No_Denda: p.fineNumber,
+          Anggota: p.memberName,
+          Rombel_Kelas: getMemberClass(p.memberId) || '-',
+          Nominal: p.amount,
+          Metode: p.method,
+          Tanggal_Bayar: p.paidAt,
+        }));
     } else if (type === 'acquisitions') {
-      rows = acquisitions.map((a) => ({
-        No_Pengadaan: a.requestNumber,
-        Ringkasan: a.titleSummary,
-        Pemasok: a.supplierName,
-        Estimasi: a.totalEstimatedCost,
-        Status: a.status,
-      }));
+      rows = acquisitions
+        .filter((a) => {
+          const aDate = tsToIso(a.createdAt).slice(0, 10);
+          if (aDate && (aDate < fromDate || aDate > toDate)) return false;
+          if (!className) return true;
+          const itemTitles = Array.isArray(a.items)
+            ? (a.items as Array<Record<string, unknown>>).map((it) => String(it.title || ''))
+            : [];
+          return doesAcquisitionTextMatchClass(
+            {
+              titleSummary: String(a.titleSummary || ''),
+              notes: String(a.notes || ''),
+              itemTitles,
+            },
+            className
+          );
+        })
+        .map((a) => ({
+          No_Pengadaan: a.requestNumber,
+          Ringkasan: a.titleSummary,
+          Pemasok: a.supplierName,
+          Estimasi_Biaya: a.totalEstimatedCost,
+          Status: a.status,
+        }));
     } else if (type === 'inventory') {
-      rows = copies.map((c) => ({
-        Kode_Inventaris: c.inventoryCode,
-        Judul: c.bookTitle,
-        Rak: c.shelfCode,
-        Kondisi: c.condition,
-        Status: c.status,
-      }));
+      rows = copies
+        .filter((c) => {
+          if (!matchesCategory(c.bookId)) return false;
+          if (!className) return true;
+          const bDoc = bookById.get(String(c.bookId || ''));
+          return (
+            doesTargetGradeMatchClass(String(bDoc?.targetGrade || 'Semua Kelas (1–6 SD)'), className) ||
+            classBorrowedCopyIds.has(String(c.id))
+          );
+        })
+        .map((c) => {
+          const bDoc = bookById.get(String(c.bookId || ''));
+          return {
+            Kode_Inventaris: c.inventoryCode,
+            Judul: c.bookTitle,
+            Target_Kelas: String(bDoc?.targetGrade || 'Semua Kelas (1–6 SD)'),
+            Rak: c.shelfCode,
+            Kondisi: c.condition,
+            Status: c.status,
+          };
+        });
     } else if (type === 'lost_damaged') {
       rows = copies
-        .filter((c) => c.condition !== 'Baik' || c.status === 'Hilang' || c.status === 'Perbaikan')
+        .filter((c) => {
+          if (!matchesCategory(c.bookId)) return false;
+          const isBad = c.condition !== 'Baik' || c.status === 'Hilang' || c.status === 'Perbaikan';
+          if (!isBad) return false;
+          if (!className) return true;
+          return classBorrowedCopyIds.has(String(c.id));
+        })
         .map((c) => ({
           Kode_Inventaris: c.inventoryCode,
           Judul: c.bookTitle,
           Kondisi: c.condition,
           Status: c.status,
         }));
+    } else if (type === 'class_rosters') {
+      const rawSchedDocs = await listCollection('reading_schedules', [where('archived', '==', false)]);
+      const targetClasses = className
+        ? activeClasses.filter((c) => matchesExactClass(String(c.className || ''), className))
+        : activeClasses;
+
+      rows = targetClasses.map((c) => {
+        const clsName = String(c.className || '');
+        const clsLower = clsName.trim().toLowerCase();
+        const activeStudents = Array.isArray(c.students)
+          ? (c.students as Array<Record<string, unknown>>).filter((s) => !s.archived).length
+          : 0;
+        const memberCount = members.filter(
+          (m) => String(m.unitOrClass || '').trim().toLowerCase() === clsLower
+        ).length;
+        const classScheds = rawSchedDocs.filter(
+          (s) => String(s.className || '').trim().toLowerCase() === clsLower && s.status !== 'Dibatalkan'
+        );
+        let totalSessions = 0;
+        let totalPresent = 0;
+        let totalBooksRead = 0;
+        for (const s of classScheds) {
+          const sLogs = Array.isArray(s.sessionLogs) ? (s.sessionLogs as Array<Record<string, unknown>>) : [];
+          for (const l of sLogs) {
+            const sDate = String(l.sessionDate || '');
+            if (sDate && (sDate < fromDate || sDate > toDate)) continue;
+            totalSessions += 1;
+            totalPresent += Number(l.studentsPresent || 0);
+            totalBooksRead += Number(l.booksReadCount || 0);
+          }
+        }
+        return {
+          Rombel: clsName,
+          Tingkat: Number(c.gradeLevel || 1),
+          Wali_Kelas: String(c.homeroomTeacher || ''),
+          Guru_Pendamping: String(c.companionTeacher || ''),
+          Ruang: String(c.roomLabel || '') || '-',
+          Siswa_Rombel: activeStudents,
+          Anggota_Perpus: memberCount,
+          Jadwal_Aktif: classScheds.length,
+          Total_Sesi: totalSessions,
+          Total_Hadir: totalPresent,
+          Buku_Dibaca: totalBooksRead,
+        };
+      });
     }
 
+    const categoryBreakdown: CirculationCategoryBreakdownItem[] = [];
+    if (isCirculationReportType(type)) {
+      const bucketMap = new Map<string, CirculationCategoryBreakdownItem>();
+      const getBucket = (catInfo: { numericId: number | null; name: string }) => {
+        const key = `${catInfo.numericId ?? 'null'}::${catInfo.name}`;
+        let item = bucketMap.get(key);
+        if (!item) {
+          item = {
+            categoryId: catInfo.numericId,
+            categoryName: catInfo.name,
+            total: 0,
+            borrowed: 0,
+            returned: 0,
+            overdue: 0,
+            totalFine: 0,
+          };
+          bucketMap.set(key, item);
+        }
+        return item;
+      };
+
+      if (type === 'returns') {
+        const loanById = new Map(loans.map((l) => [String(l.id), l]));
+        for (const r of returns) {
+          const rDate = String(r.returnedAt || '').slice(0, 10);
+          if (rDate < fromDate || rDate > toDate) continue;
+          const parentLoan = loanById.get(String(r.loanId || ''));
+          const mClass = getMemberClass(r.memberId || parentLoan?.memberId);
+          if (className && !matchesExactClass(mClass, className)) continue;
+          const cDoc = copyById.get(String(r.copyId || ''));
+          const catInfo = resolveBookCategory(r.bookId || cDoc?.bookId);
+          const b = getBucket(catInfo);
+          b.total += 1;
+          b.returned += 1;
+          if (String(r.status || '') === 'Terlambat') b.overdue += 1;
+          b.totalFine += Number(r.fineAmount || 0);
+        }
+      } else {
+        for (const l of classLoans) {
+          const lDate = String(l.loanDate || '');
+          if (type !== 'overdue' && (lDate < fromDate || lDate > toDate)) continue;
+          const items = (l.items as Array<Record<string, unknown>>) || [];
+          const seenLoansPerCat = new Set<string>();
+          for (const it of items) {
+            const copyId = String(it.copyId || '');
+            const cDoc = copyById.get(copyId);
+            const bId = it.bookId || cDoc?.bookId;
+            const dueDate = String(it.dueDate || l.dueDate || '');
+            const ret = returnByLoanCopy.get(`${String(l.id)}::${copyId}`);
+            const isOverdueItem = !ret && !it.returnedAt && dueDate < todayStr;
+            if (type === 'overdue' && !isOverdueItem) continue;
+            const catInfo = resolveBookCategory(bId);
+            const b = getBucket(catInfo);
+            if (type === 'loans') {
+              const lk = `${String(l.id)}::${catInfo.name}`;
+              if (!seenLoansPerCat.has(lk)) {
+                seenLoansPerCat.add(lk);
+                b.total += 1;
+              }
+            } else {
+              b.total += 1;
+            }
+            if (ret || it.returnedAt) {
+              b.returned += 1;
+            } else if (isOverdueItem || String(l.status || '') === 'Terlambat') {
+              b.overdue += 1;
+            } else {
+              b.borrowed += 1;
+            }
+            b.totalFine += Number(ret?.fineAmount || 0);
+          }
+        }
+      }
+
+      categoryBreakdown.push(
+        ...Array.from(bucketMap.values()).sort(
+          (a, b) => b.total - a.total || a.categoryName.localeCompare(b.categoryName, 'id')
+        )
+      );
+    }
+
+    const circulationSummary = isCirculationReportType(type)
+      ? computeCirculationSummary(rows)
+      : null;
+
+    const hintParts = [
+      getReportCategoryFilterHint(type, selectedCategoryName),
+      getReportClassFilterHint(type, className),
+    ].filter(Boolean);
+
     return jsonRes({
+      type,
+      className,
+      categoryId: catFilter,
+      selectedCategoryName,
+      filterHint: hintParts.join(' '),
+      circulationSummary,
+      categoryBreakdown,
       rows,
       categories: categories.map((c) => ({ id: Number(c.numericId), name: String(c.name) })),
+      schoolClasses,
+      otherUnits,
     });
   }
 
@@ -3392,10 +3880,11 @@ async function dispatchFirestoreApiInner(
     return jsonRes({ ok: true });
   }
 
-  // 13. /api/settings (plus Google Auth staff_roles & custom RBAC management)
+  // 13. /api/settings (plus Google Auth staff_roles, registration_requests & custom RBAC management)
   if (pathname === '/api/settings' && method === 'GET') {
     if (!isStaff) return jsonRes({ error: 'Akses ditolak.' }, 403);
-    const [globalSet, rbacSet, mTypes, members, auditLogs, users, staffRoles, snapshots] =
+    const canApproveRegs = canRoleApproveRegistrations(actor.roleSlug) || actor.permissions.includes('*');
+    const [globalSet, rbacSet, mTypes, members, auditLogs, users, staffRoles, snapshots, regReqs, classDocs] =
       await Promise.all([
         getDocument('library_settings', 'global'),
         getDocument('library_settings', 'rbac'),
@@ -3403,10 +3892,12 @@ async function dispatchFirestoreApiInner(
         listCollection('members'),
         listCollection('audit_logs'),
         listCollection('users'),
-        actor.roleSlug === 'super_admin' ? listCollection('staff_roles') : Promise.resolve([]),
+        canApproveRegs ? listCollection('staff_roles').catch(() => []) : Promise.resolve([]),
         actor.roleSlug === 'super_admin'
           ? listCollection('backup_snapshots').catch(() => [])
           : Promise.resolve([]),
+        canApproveRegs ? listCollection('registration_requests').catch(() => []) : Promise.resolve([]),
+        listCollection('school_classes').catch(() => []),
       ]);
 
     const baseRoles = SCHOOL_ROLE_CATALOG.map((r, idx) => ({
@@ -3478,6 +3969,74 @@ async function dispatchFirestoreApiInner(
       .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
     const lastSnapshotAt = sortedSnaps[0]?.createdAt || null;
 
+    const schoolClassesList = classDocs
+      .filter((c) => !c.archived)
+      .sort((a, b) => compareClassNames(String(a.className || ''), String(b.className || '')))
+      .map((c, idx) => ({
+        id: idx + 1,
+        docId: c.id,
+        className: String(c.className || ''),
+        gradeLevel: Number(c.gradeLevel || 1),
+        homeroomTeacher: normalizeTeacherDisplay(String(c.homeroomTeacher || '')),
+        companionTeacher: normalizeTeacherDisplay(String(c.companionTeacher || '')),
+      }));
+
+    const classByName = new Map(schoolClassesList.map((c) => [c.className, c]));
+
+    const registrationRequests = regReqs
+      .map((rr, idx) => {
+        const reqSlug = String(rr.requestedRole || 'anggota');
+        const reqRole = roles.find((r) => r.slug === reqSlug);
+        const assignedClass = String(rr.assignedClass || '');
+        const teacherSlot = String(rr.teacherSlot || '') as 'homeroom' | 'companion' | '';
+        const liveClass = assignedClass ? classByName.get(assignedClass) : undefined;
+        const liveExistingValue =
+          teacherSlot === 'homeroom'
+            ? liveClass?.homeroomTeacher || String(rr.conflictExistingValue || '')
+            : teacherSlot === 'companion'
+              ? liveClass?.companionTeacher || String(rr.conflictExistingValue || '')
+              : reqSlug === 'kepala_sekolah'
+                ? mergedSettings.principal_name || String(rr.conflictExistingValue || '')
+                : reqSlug === 'kepala_perpustakaan'
+                  ? mergedSettings.librarian_head_name || String(rr.conflictExistingValue || '')
+                  : String(rr.conflictExistingValue || '');
+
+        return {
+          id: idx + 1,
+          docId: rr.id,
+          requesterUid: String(rr.requesterUid || rr.id),
+          requestCode: String(rr.requestCode || ''),
+          username: String(rr.email || '').split('@')[0],
+          email: String(rr.email || ''),
+          fullName: String(rr.fullName || ''),
+          requestedRoleId: reqRole?.id || 4,
+          requestedRoleSlug: reqSlug,
+          requestedRoleName: reqRole?.name || reqSlug,
+          assignedClass,
+          teacherSlot,
+          unitOrClass: String(rr.unitOrClass || assignedClass || ''),
+          identityNumber: String(rr.identityNumber || ''),
+          gender: String(rr.gender || ''),
+          phone: String(rr.phone || ''),
+          extraMeta: (rr.extraMeta as Record<string, string>) || {},
+          hasConflict: Boolean(rr.hasConflict),
+          conflictType: String(rr.conflictType || ''),
+          conflictExistingValue: liveExistingValue,
+          conflictSummary: String(rr.conflictSummary || ''),
+          status: (rr.status as 'pending' | 'approved' | 'rejected') || 'pending',
+          decisionNote: String(rr.decisionNote || ''),
+          resolution: (rr.resolution as Record<string, unknown>) || {},
+          reviewedByName: String(rr.reviewedByName || ''),
+          reviewedAt: rr.reviewedAt ? String(rr.reviewedAt) : null,
+          createdAt: tsToIso(rr.createdAt),
+        };
+      })
+      .sort((a, b) => {
+        if (a.status === 'pending' && b.status !== 'pending') return -1;
+        if (a.status !== 'pending' && b.status === 'pending') return 1;
+        return b.createdAt.localeCompare(a.createdAt);
+      });
+
     return jsonRes({
       settings: mergedSettings,
       membershipTypes: mTypes
@@ -3512,12 +4071,15 @@ async function dispatchFirestoreApiInner(
           role_id: roles.find((r) => r.slug === u.role)?.id || 4,
           role_name: roles.find((r) => r.slug === u.role)?.name || String(u.role),
           role_slug: String(u.role),
+          assigned_class: u.assignedClass ? String(u.assignedClass) : '',
           approval_status: (u.approvalStatus as 'approved' | 'pending' | 'rejected') || 'approved',
           requested_role_slug: reqSlug,
           requested_role_name: reqRole?.name || reqSlug,
           created_at: tsToIso(u.createdAt),
         };
       }),
+      registrationRequests,
+      schoolClasses: schoolClassesList,
       staffRoles: staffRoles.map((sr) => ({
         uid: sr.id,
         email: String(sr.email),
@@ -3550,10 +4112,23 @@ async function dispatchFirestoreApiInner(
   }
 
   if (pathname === '/api/settings' && method === 'PUT') {
-    if (!actor.permissions.includes('*') && !actor.permissions.includes('settings.write')) {
+    const section = String(body?.section || '');
+    const isApprovalSection =
+      section === 'approve_registration' ||
+      section === 'reject_registration' ||
+      section === 'approve_user' ||
+      section === 'reject_user';
+
+    if (isApprovalSection) {
+      if (!canRoleApproveRegistrations(actor.roleSlug) && !actor.permissions.includes('*')) {
+        return jsonRes(
+          { error: 'Hanya Super Admin, Admin Perpustakaan, atau Kepala Perpustakaan yang dapat meninjau persetujuan akun.' },
+          403
+        );
+      }
+    } else if (!actor.permissions.includes('*') && !actor.permissions.includes('settings.write')) {
       return jsonRes({ error: 'Hanya Super Admin yang dapat mengubah pengaturan.' }, 403);
     }
-    const section = String(body?.section || '');
 
     if (section === 'general') {
       const incoming = (body?.settings as Record<string, string>) || {};
@@ -3839,9 +4414,283 @@ async function dispatchFirestoreApiInner(
       return jsonRes({ ok: true });
     }
 
+    if (section === 'approve_registration') {
+      const reqDocId = sanitizeDocId(String(body?.docId || body?.requestDocId || body?.requesterUid || ''));
+      if (!reqDocId) return jsonRes({ error: 'ID permintaan pendaftaran wajib diisi.' }, 400);
+      const reqDoc = await getDocument('registration_requests', reqDocId);
+      if (!reqDoc) return jsonRes({ error: 'Permintaan pendaftaran tidak ditemukan.' }, 404);
+      if (String(reqDoc.status) !== 'pending') {
+        return jsonRes({ error: `Permintaan sudah berstatus "${reqDoc.status}".` }, 409);
+      }
+
+      const rbacDoc = await getDocument('library_settings', 'rbac');
+      const customRoles = (rbacDoc?.customRoles as Record<string, { id: number; name: string }>) || {};
+      const baseSlugs = SCHOOL_ROLE_CATALOG.map((r) => r.slug);
+      const roleIdNum = Number(body?.roleId || 0);
+      const finalRoleSlug =
+        (typeof body?.roleSlug === 'string' && body.roleSlug.trim()) ||
+        (roleIdNum > 0
+          ? baseSlugs[roleIdNum - 1] || Object.entries(customRoles).find(([, v]) => v.id === roleIdNum)?.[0]
+          : '') ||
+        String(reqDoc.requestedRole || 'anggota');
+
+      if (!canApproverAssignRole(actor.roleSlug, finalRoleSlug)) {
+        return jsonRes({ error: 'Anda tidak memiliki wewenang untuk menetapkan peran Super Admin.' }, 403);
+      }
+
+      const targetUid = sanitizeDocId(String(reqDoc.requesterUid || reqDocId));
+      const fullName = clampString(reqDoc.fullName, 120, 'Pengguna Sekolah');
+      const email = clampString(reqDoc.email, 160);
+      const assignedClass = clampString(reqDoc.assignedClass, 60, '');
+      const unitOrClass = clampString(reqDoc.unitOrClass, 120, assignedClass);
+      const identityNumber = clampString(reqDoc.identityNumber, 64, '');
+      const gender = clampString(reqDoc.gender, 24, '');
+      const phone = clampString(reqDoc.phone, 32, '');
+      const note = clampString(body?.note, 240, '');
+      const applyClassTeacherSync = body?.applyClassTeacherSync === true;
+      const syncSchedules = body?.syncSchedules !== false;
+      const applyLeadershipSync = body?.applyLeadershipSync === true;
+      const extraMeta = (reqDoc.extraMeta as Record<string, string>) || {};
+
+      // 1. Create or activate member record if needed
+      let memberDocId = '';
+      let memberCode = '';
+      if (finalRoleSlug !== 'super_admin' && finalRoleSlug !== 'pengunjung') {
+        const mTypeCode =
+          resolveMembershipTypeCodeForSignup({
+            roleSlug: finalRoleSlug,
+            assignedClass,
+            memberSubStatus: extraMeta.memberSubStatus,
+          }) || 'SISWA_TINGGI';
+        const mTypes = await listCollection('membership_types');
+        const matchedType =
+          mTypes.find((mt) => String(mt.code) === mTypeCode) || mTypes[0];
+        const mTypeId = matchedType ? `mtype_${Number(matchedType.numericId)}` : 'mtype_2';
+        const mTypeName = matchedType ? String(matchedType.name) : 'Anggota Sekolah';
+
+        memberDocId = sanitizeDocId(`member_uid_${targetUid.slice(0, 20)}`);
+        memberCode = `AGT-2026-${targetUid.slice(0, 6).toUpperCase()}`;
+        const existingMember = await getDocument('members', memberDocId);
+        if (!existingMember) {
+          await setDoc(doc(db, 'members', memberDocId), {
+            numericId: Math.max(100, (Date.now() % 900000) + 100),
+            memberCode,
+            fullName,
+            membershipTypeId: mTypeId,
+            membershipTypeName: mTypeName,
+            identityNumber,
+            gender: gender === 'L' ? 'Laki-laki' : gender === 'P' ? 'Perempuan' : 'Tidak Disebutkan',
+            unitOrClass: unitOrClass || assignedClass || finalRoleSlug,
+            address: '',
+            phone,
+            email,
+            registeredAt: todayStr,
+            expiresAt: addDaysIso(todayStr, 365),
+            status: 'Aktif',
+            blockReason: '',
+            ownerUid: targetUid,
+            archived: false,
+            createdAt: serverTimestamp(),
+            updatedAt: serverTimestamp(),
+          });
+        }
+      }
+
+      // 2. Create or update users/{uid}
+      const assignedClassForUser =
+        (finalRoleSlug === 'wali_kelas' || finalRoleSlug === 'guru_pendamping') &&
+        !applyClassTeacherSync
+          ? ''
+          : assignedClass;
+      const existingUser = await getDocument('users', targetUid);
+      if (existingUser) {
+        await updateDoc(doc(db, 'users', targetUid), {
+          fullName,
+          email,
+          role: finalRoleSlug,
+          requestedRole: String(reqDoc.requestedRole || finalRoleSlug),
+          approvalStatus: 'approved',
+          assignedClass: assignedClassForUser,
+          ...(memberDocId ? { memberId: memberDocId, memberCode } : {}),
+          isActive: true,
+          updatedAt: serverTimestamp(),
+        });
+      } else {
+        await setDoc(doc(db, 'users', targetUid), {
+          uid: targetUid,
+          email,
+          fullName,
+          role: finalRoleSlug,
+          requestedRole: String(reqDoc.requestedRole || finalRoleSlug),
+          approvalStatus: 'approved',
+          assignedClass: assignedClassForUser,
+          memberId: memberDocId,
+          memberCode,
+          isActive: true,
+          createdAt: serverTimestamp(),
+          updatedAt: serverTimestamp(),
+        });
+      }
+
+      // 3. Assign staff_roles if staff role
+      const staffRoleSlugs = new Set([
+        'super_admin',
+        'kepala_sekolah',
+        'wakil_kepala_sekolah',
+        'kepala_perpustakaan',
+        'admin_perpus',
+        'pustakawan',
+        'staff_tu',
+        'bendahara_sekolah',
+        'operator_it',
+      ]);
+      if (staffRoleSlugs.has(finalRoleSlug)) {
+        const existingStaff = await getDocument('staff_roles', targetUid);
+        if (existingStaff) {
+          await updateDoc(doc(db, 'staff_roles', targetUid), {
+            email,
+            fullName,
+            role: finalRoleSlug,
+            isActive: true,
+            assignedByUid: actor.uid,
+            updatedAt: serverTimestamp(),
+          });
+        } else {
+          await setDoc(doc(db, 'staff_roles', targetUid), {
+            uid: targetUid,
+            email,
+            fullName,
+            role: finalRoleSlug,
+            isActive: true,
+            assignedByUid: actor.uid,
+            createdAt: serverTimestamp(),
+            updatedAt: serverTimestamp(),
+          });
+        }
+      }
+
+      // 4. Optional class teacher + schedules sync
+      let classTeacherApplied = false;
+      let schedulesSyncedCount = 0;
+      if (
+        applyClassTeacherSync &&
+        assignedClass &&
+        (finalRoleSlug === 'wali_kelas' || finalRoleSlug === 'guru_pendamping')
+      ) {
+        const classDocId = sanitizeDocId(classNameToDocId(assignedClass));
+        const classDoc = await getDocument('school_classes', classDocId);
+        const teacherField = finalRoleSlug === 'wali_kelas' ? 'homeroomTeacher' : 'companionTeacher';
+        if (classDoc) {
+          await updateDoc(doc(db, 'school_classes', classDocId), {
+            [teacherField]: fullName,
+            updatedByUid: actor.uid,
+            updatedAt: serverTimestamp(),
+          });
+          const pubClass = await getDocument('public_classes', classDocId);
+          if (pubClass) {
+            await updateDoc(doc(db, 'public_classes', classDocId), {
+              [teacherField]: fullName,
+              updatedAt: serverTimestamp(),
+            });
+          }
+          classTeacherApplied = true;
+          if (syncSchedules) {
+            const scheds = await listCollection('reading_schedules', [where('archived', '==', false)]);
+            const matching = scheds.filter((s) => String(s.className) === assignedClass);
+            for (const m of matching) {
+              await updateDoc(doc(db, 'reading_schedules', m.id), {
+                [teacherField]: fullName,
+                updatedAt: serverTimestamp(),
+              });
+              schedulesSyncedCount++;
+            }
+          }
+        }
+      }
+
+      // 5. Optional leadership kop surat sync
+      let leadershipApplied = false;
+      if (
+        applyLeadershipSync &&
+        (finalRoleSlug === 'kepala_sekolah' || finalRoleSlug === 'kepala_perpustakaan')
+      ) {
+        const globalDoc = await getDocument('library_settings', 'global');
+        const vals = { ...((globalDoc?.values as Record<string, string>) || {}) };
+        if (finalRoleSlug === 'kepala_sekolah') vals.principal_name = fullName;
+        if (finalRoleSlug === 'kepala_perpustakaan') vals.librarian_head_name = fullName;
+        await updateDoc(doc(db, 'library_settings', 'global'), {
+          values: vals,
+          updatedByUid: actor.uid,
+          updatedAt: serverTimestamp(),
+        });
+        leadershipApplied = true;
+      }
+
+      const resolution = {
+        decision: 'approved',
+        finalRoleSlug,
+        applyClassTeacherSync: classTeacherApplied,
+        syncSchedules: classTeacherApplied && syncSchedules,
+        schedulesSyncedCount,
+        applyLeadershipSync: leadershipApplied,
+      };
+
+      await updateDoc(doc(db, 'registration_requests', reqDocId), {
+        status: 'approved',
+        decisionNote: note,
+        resolution,
+        reviewedByUid: actor.uid,
+        reviewedByName: actor.fullName,
+        reviewedAt: new Date().toISOString(),
+        updatedAt: serverTimestamp(),
+      });
+
+      await writeAuditLog(
+        actor,
+        'REGISTRATION_APPROVE',
+        'registration_requests',
+        reqDocId,
+        `Setujui ${email} -> ${finalRoleSlug} (sync kelas: ${classTeacherApplied ? 'ya' : 'tidak'})`
+      );
+      return jsonRes({ ok: true, resolution });
+    }
+
+    if (section === 'reject_registration') {
+      const reqDocId = sanitizeDocId(String(body?.docId || body?.requestDocId || body?.requesterUid || ''));
+      if (!reqDocId) return jsonRes({ error: 'ID permintaan pendaftaran wajib diisi.' }, 400);
+      const reqDoc = await getDocument('registration_requests', reqDocId);
+      if (!reqDoc) return jsonRes({ error: 'Permintaan pendaftaran tidak ditemukan.' }, 404);
+      if (String(reqDoc.status) !== 'pending') {
+        return jsonRes({ error: `Permintaan sudah berstatus "${reqDoc.status}".` }, 409);
+      }
+      const note = clampString(body?.note, 240, '');
+      await updateDoc(doc(db, 'registration_requests', reqDocId), {
+        status: 'rejected',
+        decisionNote: note,
+        resolution: { decision: 'rejected', accountCreated: false, classModified: false },
+        reviewedByUid: actor.uid,
+        reviewedByName: actor.fullName,
+        reviewedAt: new Date().toISOString(),
+        updatedAt: serverTimestamp(),
+      });
+      await writeAuditLog(
+        actor,
+        'REGISTRATION_REJECT',
+        'registration_requests',
+        reqDocId,
+        `Tolak pendaftaran ${String(reqDoc.email)} (akun tidak disimpan)`
+      );
+      return jsonRes({ ok: true, accountCreated: false });
+    }
+
     if (section === 'update_user' || section === 'change_user_role' || section === 'approve_user' || section === 'reject_user') {
-      if (actor.roleSlug !== 'super_admin' && !actor.permissions.includes('*')) {
-        return jsonRes({ error: 'Hanya Super Admin yang dapat mengelola peran dan persetujuan akun.' }, 403);
+      const isApproveOrReject = section === 'approve_user' || section === 'reject_user';
+      if (isApproveOrReject) {
+        if (!canRoleApproveRegistrations(actor.roleSlug) && !actor.permissions.includes('*')) {
+          return jsonRes({ error: 'Hanya Super Admin, Admin Perpustakaan, atau Kepala Perpustakaan yang dapat menyetujui akun.' }, 403);
+        }
+      } else if (actor.roleSlug !== 'super_admin' && !actor.permissions.includes('*')) {
+        return jsonRes({ error: 'Hanya Super Admin yang dapat mengelola peran akun.' }, 403);
       }
       const targetUid = sanitizeDocId(String(body?.uid || ''));
       if (!targetUid) return jsonRes({ error: 'UID pengguna Google wajib diisi.' }, 400);
@@ -4117,6 +4966,16 @@ async function dispatchFirestoreApiInner(
           backup_include_audit_logs: settingsVal.backup_include_audit_logs || 'false',
         };
 
+        const opCollections = new Set<string>(PURGEABLE_FIRESTORE_COLLECTIONS);
+        let operationalRecordCount = 0;
+        for (const [tbl, rows] of Object.entries(allTables)) {
+          if (opCollections.has(tbl) && Array.isArray(rows)) {
+            operationalRecordCount += rows.length;
+          }
+        }
+        operationalRecordCount += Math.max(0, (allTables.users?.length || 0) - 1);
+        const purgeEligibility = evaluatePurgeBackupPrerequisite(snapshots, operationalRecordCount);
+
         return jsonRes({
           sourceEngine: 'firestore',
           totalTables: Object.keys(allTables).length,
@@ -4126,6 +4985,7 @@ async function dispatchFirestoreApiInner(
           snapshots,
           policy,
           health: evaluateBackupHealth(snapshots[0]?.created_at || null, policy.backup_auto_frequency),
+          purgeEligibility,
         });
       }
 
@@ -4217,6 +5077,7 @@ async function dispatchFirestoreApiInner(
           ok: true,
           snapshot: {
             id: nextNumericId,
+            docId,
             snapshot_code: code,
             label: envelope.label,
             mode: envelope.mode,
@@ -4224,7 +5085,136 @@ async function dispatchFirestoreApiInner(
             checksum: envelope.checksum,
             total_records: envelope.totalRecords,
             size_bytes: sizeBytes,
+            created_at: envelope.exportedAt,
           },
+        });
+      }
+
+      if (action === 'purge_all_data') {
+        if (actor.roleSlug !== 'super_admin') {
+          return jsonRes(
+            { error: 'Hanya Super Admin yang berwenang menghapus seluruh data operasional.' },
+            403
+          );
+        }
+
+        const snapDocs = await listCollection('backup_snapshots').catch(() => []);
+        const requestedSnapId = body?.prerequisiteSnapshotId
+          ? String(body.prerequisiteSnapshotId)
+          : '';
+        const sortedSnaps = [...snapDocs].sort((a, b) =>
+          tsToIso(b.createdAt).localeCompare(tsToIso(a.createdAt))
+        );
+        const foundSnap = requestedSnapId
+          ? sortedSnaps.find(
+              (s) =>
+                String(s.numericId) === requestedSnapId ||
+                s.id === requestedSnapId ||
+                String(s.snapshotCode) === requestedSnapId
+            )
+          : sortedSnaps.find((s) => String(s.mode || '') === 'full');
+
+        const candidate = foundSnap
+          ? {
+              id: Number(foundSnap.numericId || 1),
+              snapshot_code: String(foundSnap.snapshotCode || foundSnap.id),
+              label: String(foundSnap.label || 'Snapshot Cloud'),
+              mode: String(foundSnap.mode || 'full'),
+              checksum: String(foundSnap.checksum || ''),
+              total_records: Number(foundSnap.totalRecords || 0),
+              created_at: tsToIso(foundSnap.createdAt),
+            }
+          : null;
+
+        const purgeCheck = validatePurgeAllDataRequest({
+          actorRoleSlug: actor.roleSlug,
+          confirmationPhrase: String(body?.confirmationPhrase || ''),
+          acknowledgeIrreversible: Boolean(body?.acknowledgeIrreversible),
+          prerequisiteSnapshot: candidate,
+        });
+
+        if (!purgeCheck.ok || !foundSnap || !candidate) {
+          return jsonRes(
+            { error: purgeCheck.reason || 'Persyaratan backup penuh sebelum hapus data belum terpenuhi.' },
+            400
+          );
+        }
+
+        const purgedAt = new Date().toISOString();
+        const deletedByCollection: Record<string, number> = {};
+        let deletedRowsTotal = 0;
+
+        for (const colName of PURGEABLE_FIRESTORE_COLLECTIONS) {
+          const docs = await listCollection(colName).catch(() => []);
+          if (docs.length === 0) {
+            deletedByCollection[colName] = 0;
+            continue;
+          }
+          let count = 0;
+          for (let i = 0; i < docs.length; i += 400) {
+            const chunk = docs.slice(i, i + 400);
+            const batch = writeBatch(db);
+            for (const d of chunk) {
+              batch.delete(doc(db, colName, d.id));
+              count++;
+            }
+            await batch.commit();
+          }
+          deletedByCollection[colName] = count;
+          deletedRowsTotal += count;
+        }
+
+        // Remove non-self user documents while strictly keeping active Super Admin account
+        const allUserDocs = await listCollection('users').catch(() => []);
+        const usersToDelete = allUserDocs.filter((u) => u.id !== actor.uid);
+        let deletedUsers = 0;
+        for (let i = 0; i < usersToDelete.length; i += 400) {
+          const chunk = usersToDelete.slice(i, i + 400);
+          const batch = writeBatch(db);
+          for (const u of chunk) {
+            batch.delete(doc(db, 'users', u.id));
+            deletedUsers++;
+          }
+          await batch.commit();
+        }
+        deletedByCollection.users = deletedUsers;
+        deletedRowsTotal += deletedUsers;
+
+        // Mark global settings with data_purged_at so school_classes auto-seeder stays empty
+        const existingGlobal = await getDocument('library_settings', 'global');
+        const nextValues = {
+          ...((existingGlobal?.values as Record<string, string>) || {}),
+          data_purged_at: purgedAt,
+        };
+        await setDoc(
+          doc(db, 'library_settings', 'global'),
+          {
+            kind: 'global',
+            seeded: true,
+            values: nextValues,
+            updatedByUid: clampString(actor.uid, 128, 'system'),
+            updatedAt: serverTimestamp(),
+          },
+          { merge: true }
+        );
+
+        await writeAuditLog(
+          actor,
+          'DATABASE_PURGE_ALL',
+          'backup',
+          candidate.snapshot_code,
+          `Hapus seluruh data operasional (${deletedRowsTotal} dokumen). Backup prasyarat: ${candidate.snapshot_code}`
+        );
+
+        return jsonRes({
+          ok: true,
+          purgedAt,
+          deletedRowsTotal,
+          deletedTables: Object.keys(deletedByCollection).length,
+          deletedByTable: deletedByCollection,
+          prerequisiteSnapshotId: candidate.id,
+          prerequisiteSnapshotCode: candidate.snapshot_code,
+          preservedUserId: actor.uid,
         });
       }
 
@@ -4282,17 +5272,84 @@ async function dispatchFirestoreApiInner(
         });
       }
 
+      // Restore supported Firestore collections from verified snapshot/upload
+      const restorableCollections = new Set<string>([
+        'books',
+        'book_copies',
+        'categories',
+        'locations',
+        'shelves',
+        'membership_types',
+        'members',
+        'loans',
+        'returns',
+        'reservations',
+        'fines',
+        'payments',
+        'school_classes',
+        'reading_schedules',
+        'suppliers',
+        'acquisitions',
+        'inventory_audits',
+        'notifications',
+      ]);
+
+      let restoredRowsTotal = 0;
+      let restoredCollectionsCount = 0;
+
+      for (const [colName, rows] of Object.entries(tables)) {
+        if (!restorableCollections.has(colName) || !Array.isArray(rows)) continue;
+        restoredCollectionsCount++;
+        for (let i = 0; i < rows.length; i += 350) {
+          const chunk = rows.slice(i, i + 350);
+          const batch = writeBatch(db);
+          for (const rawRow of chunk) {
+            const row = { ...rawRow } as Record<string, unknown>;
+            const docId = sanitizeDocId(String(row.id || `${colName}_${Date.now()}_${i}`));
+            delete row.id;
+            batch.set(
+              doc(db, colName, docId),
+              {
+                ...row,
+                updatedAt: serverTimestamp(),
+              },
+              { merge: true }
+            );
+            restoredRowsTotal++;
+          }
+          await batch.commit();
+        }
+      }
+
+      // Clear data_purged_at marker on global settings after restore
+      const globalAfter = await getDocument('library_settings', 'global');
+      if (globalAfter?.values) {
+        const cleanedValues = { ...(globalAfter.values as Record<string, string>) };
+        delete cleanedValues.data_purged_at;
+        await setDoc(
+          doc(db, 'library_settings', 'global'),
+          {
+            kind: 'global',
+            seeded: true,
+            values: cleanedValues,
+            updatedByUid: clampString(actor.uid, 128, 'system'),
+            updatedAt: serverTimestamp(),
+          },
+          { merge: true }
+        );
+      }
+
       await writeAuditLog(
         actor,
         'DATABASE_RESTORE',
         'backup',
         'firestore',
-        `Verifikasi & sinkronisasi cadangan (${check.totalRecords || 0} rekord)`
+        `Pemulihan cadangan (${restoredRowsTotal} dokumen pada ${restoredCollectionsCount} koleksi)`
       );
       return jsonRes({
         ok: true,
-        restoredTables: Object.keys(tables).length,
-        restoredRows: check.totalRecords || 0,
+        restoredTables: restoredCollectionsCount || Object.keys(tables).length,
+        restoredRows: restoredRowsTotal || check.totalRecords || 0,
         modulesRestored: check.selectedModules || [],
       });
     }
@@ -4314,12 +5371,29 @@ async function dispatchFirestoreApiInner(
   const ensureSchoolClassesDocs = async (): Promise<FsDoc[]> => {
     let classDocs = await listCollection('school_classes');
     if (classDocs.length === 0 && isStaff) {
+      const globalDoc = await getDocument('library_settings', 'global');
+      const globalVals = (globalDoc?.values as Record<string, string>) || {};
+      if (globalVals.data_purged_at) {
+        return classDocs;
+      }
       const seedBatch = writeBatch(db);
       for (const sc of SEED_SCHOOL_CLASSES) {
         const { id, ...rest } = sc;
         seedBatch.set(doc(db, 'school_classes', id), {
           ...rest,
+          roomLabel: '',
+          notes: '',
+          archived: false,
           updatedByUid: clampString(actor.uid, 128, 'system'),
+          createdAt: serverTimestamp(),
+          updatedAt: serverTimestamp(),
+        });
+        seedBatch.set(doc(db, 'public_classes', id), {
+          className: rest.className,
+          gradeLevel: rest.gradeLevel,
+          homeroomTeacher: rest.homeroomTeacher,
+          companionTeacher: rest.companionTeacher,
+          archived: false,
           createdAt: serverTimestamp(),
           updatedAt: serverTimestamp(),
         });
@@ -4332,38 +5406,56 @@ async function dispatchFirestoreApiInner(
       }
     }
     if (classDocs.length === 0) {
-      return SEED_SCHOOL_CLASSES.map((sc) => ({ ...sc } as unknown as FsDoc));
+      return SEED_SCHOOL_CLASSES.map((sc) => ({ ...sc, archived: false } as unknown as FsDoc));
     }
-    return classDocs.sort(
-      (a, b) =>
-        Number(a.gradeLevel || 0) - Number(b.gradeLevel || 0) ||
-        String(a.className || '').localeCompare(String(b.className || ''))
+    return [...classDocs].sort((a, b) =>
+      compareClassNames(String(a.className || ''), String(b.className || ''))
     );
   };
 
   if (pathname === '/api/class-rosters' && method === 'GET') {
     const classFilter = url.searchParams.get('className')?.trim() || '';
-    const [classDocs, schedDocs] = await Promise.all([
+    const includeArchived = url.searchParams.get('includeArchived') === '1';
+    const [allClassDocs, schedDocs, memberDocs] = await Promise.all([
       ensureSchoolClassesDocs(),
       listCollection('reading_schedules', [where('archived', '==', false)]),
+      isStaff ? listCollection('members', [where('archived', '==', false)]) : Promise.resolve([]),
     ]);
 
-    const classes = classDocs.map((c) => {
+    const visibleClassDocs = includeArchived
+      ? allClassDocs
+      : allClassDocs.filter((c) => !c.archived);
+
+    const classes = visibleClassDocs.map((c) => {
+      const clsName = String(c.className || '');
+      const clsLower = clsName.trim().toLowerCase();
       const stList = Array.isArray(c.students)
         ? (c.students as Array<Record<string, unknown>>).filter((s) => !s.archived)
         : [];
+      const scheduleCount = schedDocs.filter(
+        (s) => String(s.className || '').trim().toLowerCase() === clsLower && s.status !== 'Dibatalkan'
+      ).length;
+      const memberCount = memberDocs.filter(
+        (m) => String(m.unitOrClass || '').trim().toLowerCase() === clsLower
+      ).length;
       return {
-        className: String(c.className || ''),
+        id: c.id,
+        className: clsName,
         gradeLevel: Number(c.gradeLevel || 1),
         homeroomTeacher: String(c.homeroomTeacher || ''),
         companionTeacher: String(c.companionTeacher || ''),
+        roomLabel: String(c.roomLabel || ''),
+        notes: String(c.notes || ''),
+        archived: Boolean(c.archived),
         activeStudentCount: stList.length,
+        scheduleCount,
+        memberCount,
       };
     });
 
     const targetClasses = classFilter
-      ? classDocs.filter((c) => String(c.className) === classFilter)
-      : classDocs;
+      ? allClassDocs.filter((c) => String(c.className).toLowerCase() === classFilter.toLowerCase())
+      : visibleClassDocs;
 
     const students: ClassStudentRecord[] = [];
     for (const c of targetClasses) {
@@ -4383,12 +5475,12 @@ async function dispatchFirestoreApiInner(
       }
     }
     students.sort(
-      (a, b) => a.className.localeCompare(b.className) || a.studentCode.localeCompare(b.studentCode)
+      (a, b) => compareClassNames(a.className, b.className) || a.studentCode.localeCompare(b.studentCode)
     );
 
     const attGroups: AttendanceRecordItem[][] = [];
     for (const sc of schedDocs) {
-      if (classFilter && String(sc.className) !== classFilter) continue;
+      if (classFilter && String(sc.className).toLowerCase() !== classFilter.toLowerCase()) continue;
       const logs = Array.isArray(sc.sessionLogs) ? (sc.sessionLogs as Array<Record<string, unknown>>) : [];
       for (const l of logs) {
         if (Array.isArray(l.attendance) && l.attendance.length > 0) {
@@ -4415,28 +5507,54 @@ async function dispatchFirestoreApiInner(
     const className = clampString(body?.className, 40);
     const homeroomTeacher = clampString(body?.homeroomTeacher, 120);
     const companionTeacher = clampString(body?.companionTeacher, 120);
+    const roomLabel = body?.roomLabel !== undefined ? clampString(body.roomLabel, 60, '') : undefined;
+    const notes = body?.notes !== undefined ? clampString(body.notes, 240, '') : undefined;
     const syncSchedules = body?.syncSchedules !== false;
 
-    if (!SD_CLASSES.some((c) => c.className === className)) {
-      return jsonRes({ error: 'Nama kelas SD tidak valid.' }, 400);
+    if (!className) {
+      return jsonRes({ error: 'Nama rombel kelas wajib diisi.' }, 400);
     }
     if (homeroomTeacher.length < 3 || companionTeacher.length < 3) {
       return jsonRes({ error: 'Nama wali kelas dan guru pendamping minimal 3 karakter.' }, 400);
     }
 
-    await ensureSchoolClassesDocs();
-    const classDocId = classNameToDocId(className);
+    const classDocs = await ensureSchoolClassesDocs();
+    const targetDoc = classDocs.find(
+      (c) => String(c.className).toLowerCase() === className.toLowerCase() && !c.archived
+    );
+    if (!targetDoc) {
+      return jsonRes({ error: 'Data rombel kelas tidak ditemukan atau sudah diarsipkan.' }, 404);
+    }
+
+    const canonicalName = String(targetDoc.className);
+    const updatePayload: Record<string, unknown> = {
+      homeroomTeacher,
+      companionTeacher,
+      updatedByUid: clampString(actor.uid, 128, 'system'),
+      updatedAt: serverTimestamp(),
+    };
+    if (roomLabel !== undefined) updatePayload.roomLabel = roomLabel;
+    if (notes !== undefined) updatePayload.notes = notes;
+
     try {
-      await updateDoc(doc(db, 'school_classes', classDocId), {
-        homeroomTeacher,
-        companionTeacher,
-        updatedByUid: clampString(actor.uid, 128, 'system'),
-        updatedAt: serverTimestamp(),
-      });
+      await updateDoc(doc(db, 'school_classes', targetDoc.id), updatePayload);
+      await setDoc(
+        doc(db, 'public_classes', targetDoc.id),
+        {
+          className: canonicalName,
+          gradeLevel: Number(targetDoc.gradeLevel || 1),
+          homeroomTeacher,
+          companionTeacher,
+          archived: false,
+          createdAt: targetDoc.createdAt || serverTimestamp(),
+          updatedAt: serverTimestamp(),
+        },
+        { merge: true }
+      ).catch(() => {});
 
       if (syncSchedules) {
         const scheds = await listCollection('reading_schedules', [where('archived', '==', false)]);
-        const matching = scheds.filter((s) => String(s.className) === className);
+        const matching = scheds.filter((s) => String(s.className) === canonicalName);
         if (matching.length > 0) {
           const batch = writeBatch(db);
           for (const m of matching) {
@@ -4450,38 +5568,243 @@ async function dispatchFirestoreApiInner(
         }
       }
     } catch (err) {
-      handleFirestoreError(err, OperationType.UPDATE, `school_classes/${classDocId}`);
+      handleFirestoreError(err, OperationType.UPDATE, `school_classes/${targetDoc.id}`);
     }
 
     await writeAuditLog(
       actor,
       'CLASS_TEACHERS_UPDATE',
       'school_classes',
-      className,
+      canonicalName,
       `Wali: ${homeroomTeacher} | Pendamping: ${companionTeacher}`
     );
-    return jsonRes({ ok: true });
+    return jsonRes({ ok: true, className: canonicalName });
   }
 
   if (pathname === '/api/class-rosters' && method === 'POST') {
     if (!isStaff) return jsonRes({ error: 'Akses ditolak.' }, 403);
+    const action = String(body?.action || 'create_student').trim();
+
+    if (action === 'create_class' || action === 'create_rombel') {
+      const check = validateRombelPayload({
+        gradeLevel: body?.gradeLevel as number | string | undefined,
+        section: body?.section !== undefined ? String(body.section) : undefined,
+        className: body?.className !== undefined ? String(body.className) : undefined,
+        homeroomTeacher: String(body?.homeroomTeacher || ''),
+        companionTeacher: String(body?.companionTeacher || ''),
+        roomLabel: body?.roomLabel !== undefined ? String(body.roomLabel) : '',
+        notes: body?.notes !== undefined ? String(body.notes) : '',
+      });
+      if (!check.ok || !check.normalized) {
+        return jsonRes({ error: check.reason }, 400);
+      }
+
+      const norm = check.normalized;
+      const classDocs = await ensureSchoolClassesDocs();
+      const dup = classDocs.find(
+        (c) => String(c.className).toLowerCase() === norm.className.toLowerCase()
+      );
+      if (dup) {
+        if (dup.archived) {
+          return jsonRes(
+            {
+              error: `Rombel "${dup.className}" pernah diarsipkan. Anda dapat memulihkannya dari daftar arsip rombel.`,
+              archivedExists: true,
+              className: String(dup.className),
+            },
+            409
+          );
+        }
+        return jsonRes(
+          { error: `Rombel "${dup.className}" sudah terdaftar di sistem.` },
+          409
+        );
+      }
+
+      const bulkStudentsInput =
+        typeof body?.initialStudentsText === 'string' && body.initialStudentsText.trim()
+          ? parseBulkStudentLines(body.initialStudentsText)
+          : Array.isArray(body?.initialStudents)
+            ? (body.initialStudents as Array<{
+                fullName?: string;
+                gender?: string;
+                studentCode?: string;
+              }>)
+                .map((s) => ({
+                  fullName: String(s.fullName || '').trim(),
+                  gender: (String(s.gender || 'L').toUpperCase() === 'P' ? 'P' : 'L') as 'L' | 'P',
+                  studentCode: s.studentCode ? String(s.studentCode).trim() : undefined,
+                }))
+                .filter((s) => s.fullName.length >= 2)
+            : [];
+
+      const shortCode = norm.className
+        .replace(/^Kelas\s+/i, '')
+        .replace(/[^A-Za-z0-9]/g, '')
+        .toUpperCase();
+      const initialStudentObjects = bulkStudentsInput.slice(0, 60).map((st, idx) => {
+        const studentCode =
+          st.studentCode || `NIS-${shortCode}-${String(idx + 1).padStart(2, '0')}`;
+        return {
+          id: `stu_${shortCode.toLowerCase()}_${String(idx + 1).padStart(2, '0')}_${Date.now()}`,
+          studentCode,
+          fullName: clampString(st.fullName, 100),
+          gender: st.gender,
+          status: 'Aktif',
+          notes: '',
+          archived: false,
+        };
+      });
+
+      const classDocId = sanitizeDocId(classNameToDocId(norm.className));
+      try {
+        await setDoc(doc(db, 'school_classes', classDocId), {
+          className: clampString(norm.className, 40),
+          gradeLevel: norm.gradeLevel,
+          homeroomTeacher: clampString(norm.homeroomTeacher, 120),
+          companionTeacher: clampString(norm.companionTeacher, 120),
+          roomLabel: clampString(norm.roomLabel, 60, ''),
+          notes: clampString(norm.notes, 240, ''),
+          archived: false,
+          students: initialStudentObjects,
+          updatedByUid: clampString(actor.uid, 128, 'system'),
+          createdAt: serverTimestamp(),
+          updatedAt: serverTimestamp(),
+        });
+        await setDoc(doc(db, 'public_classes', classDocId), {
+          className: clampString(norm.className, 40),
+          gradeLevel: norm.gradeLevel,
+          homeroomTeacher: clampString(norm.homeroomTeacher, 120),
+          companionTeacher: clampString(norm.companionTeacher, 120),
+          archived: false,
+          createdAt: serverTimestamp(),
+          updatedAt: serverTimestamp(),
+        }).catch(() => {});
+      } catch (err) {
+        handleFirestoreError(err, OperationType.CREATE, `school_classes/${classDocId}`);
+      }
+
+      let createdScheduleCode: string | null = null;
+      if (body?.autoCreateSchedule === true) {
+        const [allSchedDocs, catalogDocs] = await Promise.all([
+          listCollection('reading_schedules'),
+          listCollection('public_catalog', [where('archived', '==', false)]),
+        ]);
+        const activeSchedDocs = allSchedDocs.filter((d) => !d.archived);
+        const firstBook = catalogDocs[0];
+        const newPreset: SdClassPreset = {
+          className: norm.className,
+          gradeLevel: norm.gradeLevel,
+          homeroomTeacher: norm.homeroomTeacher,
+          companionTeacher: norm.companionTeacher,
+          studentCount: initialStudentObjects.length > 0 ? initialStudentObjects.length : 20,
+        };
+        const slots = buildAutoClassScheduleSlots(
+          activeSchedDocs.map((d) => ({
+            id: Number(d.numericId),
+            scheduleCode: String(d.scheduleCode || ''),
+            className: String(d.className || ''),
+            gradeLevel: Number(d.gradeLevel || 1),
+            homeroomTeacher: String(d.homeroomTeacher || ''),
+            companionTeacher: String(d.companionTeacher || ''),
+            studentCount: Number(d.studentCount || 10),
+            dayOfWeek: String(d.dayOfWeek || 'Senin'),
+            startTime: String(d.startTime || '07:15'),
+            endTime: String(d.endTime || '07:50'),
+            roomArea: String(d.roomArea || 'Pojok Baca Karpet'),
+            readingMode: String(d.readingMode || 'Literasi Pagi'),
+            status: String(d.status || 'Terjadwal'),
+            archived: Boolean(d.archived),
+          })),
+          firstBook ? { id: Number(firstBook.numericId), title: String(firstBook.title || '') } : null,
+          [newPreset]
+        );
+        if (slots.length > 0) {
+          const slot = slots[0];
+          const numId = nextNumericId(allSchedDocs);
+          const schedDocId = sanitizeDocId(`sched_${numId}`);
+          createdScheduleCode = `JDW-2026-${String(numId).padStart(4, '0')}`;
+          try {
+            await setDoc(doc(db, 'reading_schedules', schedDocId), {
+              numericId: numId,
+              scheduleCode: createdScheduleCode,
+              className: clampString(slot.className, 40),
+              gradeLevel: slot.gradeLevel,
+              homeroomTeacher: clampString(slot.homeroomTeacher, 120),
+              companionTeacher: clampString(slot.companionTeacher, 120),
+              studentCount: slot.studentCount,
+              dayOfWeek: slot.dayOfWeek,
+              scheduleDate: '',
+              startTime: slot.startTime,
+              endTime: slot.endTime,
+              roomArea: clampString(slot.roomArea, 100),
+              readingMode: clampString(slot.readingMode, 80),
+              readingTheme: clampString(slot.readingTheme, 200),
+              bookId: firstBook ? firstBook.id : '',
+              bookNumericId: firstBook ? Number(firstBook.numericId) : 0,
+              bookTitle: firstBook ? clampString(firstBook.title, 240) : '',
+              status: 'Terjadwal',
+              studentsPresent: 0,
+              booksReadCount: 0,
+              sessionNotes: '',
+              completedAt: '',
+              sessionLogs: [],
+              archived: false,
+              createdByUid: clampString(actor.uid, 128, 'system'),
+              createdAt: serverTimestamp(),
+              updatedAt: serverTimestamp(),
+            });
+          } catch (err) {
+            handleFirestoreError(err, OperationType.CREATE, `reading_schedules/${schedDocId}`);
+          }
+        }
+      }
+
+      await writeAuditLog(
+        actor,
+        'CLASS_ROMBEL_CREATE',
+        'school_classes',
+        norm.className,
+        `Tambah rombel ${norm.className} (Wali: ${norm.homeroomTeacher}, ${initialStudentObjects.length} siswa)`
+      );
+
+      return jsonRes(
+        {
+          id: classDocId,
+          ...norm,
+          createdStudentsCount: initialStudentObjects.length,
+          createdScheduleCode,
+        },
+        201
+      );
+    }
+
     const className = clampString(body?.className, 40);
     const fullName = clampString(body?.fullName, 100);
     const gender = String(body?.gender || 'L').toUpperCase() === 'P' ? 'P' : 'L';
     const rawCode = clampString(body?.studentCode, 32, '');
     const notes = clampString(body?.notes, 200, '');
 
-    const check = validateStudentPayload({
-      className,
-      fullName,
-      studentCode: rawCode || undefined,
-      gender,
-    });
+    const classDocs = await ensureSchoolClassesDocs();
+    const activeClasses = classDocs.filter((c) => !c.archived);
+    const allowedClassNames = activeClasses.map((c) => String(c.className));
+
+    const check = validateStudentPayload(
+      {
+        className,
+        fullName,
+        studentCode: rawCode || undefined,
+        gender,
+      },
+      allowedClassNames
+    );
     if (!check.ok) return jsonRes({ error: check.reason }, 400);
 
-    const classDocs = await ensureSchoolClassesDocs();
-    const classDoc = classDocs.find((c) => String(c.className) === className);
-    if (!classDoc) return jsonRes({ error: 'Data kelas tidak ditemukan.' }, 404);
+    const classDoc = activeClasses.find(
+      (c) => String(c.className).toLowerCase() === className.toLowerCase()
+    );
+    if (!classDoc) return jsonRes({ error: 'Data rombel kelas tidak ditemukan.' }, 404);
+    const canonicalClass = String(classDoc.className);
 
     const currentStudents = Array.isArray(classDoc.students)
       ? [...(classDoc.students as Array<Record<string, unknown>>)]
@@ -4490,7 +5813,10 @@ async function dispatchFirestoreApiInner(
       return jsonRes({ error: 'Batas maksimal 60 siswa per kelas telah tercapai.' }, 400);
     }
 
-    const shortCode = className.replace(/^Kelas\s+/i, '').toUpperCase();
+    const shortCode = canonicalClass
+      .replace(/^Kelas\s+/i, '')
+      .replace(/[^A-Za-z0-9]/g, '')
+      .toUpperCase();
     let studentCode = rawCode;
     if (!studentCode) {
       let seq = currentStudents.length + 1;
@@ -4521,7 +5847,7 @@ async function dispatchFirestoreApiInner(
         updatedAt: serverTimestamp(),
       });
       const scheds = await listCollection('reading_schedules', [where('archived', '==', false)]);
-      const matching = scheds.filter((s) => String(s.className) === className);
+      const matching = scheds.filter((s) => String(s.className) === canonicalClass);
       if (matching.length > 0) {
         const batch = writeBatch(db);
         for (const m of matching) {
@@ -4536,17 +5862,99 @@ async function dispatchFirestoreApiInner(
       handleFirestoreError(err, OperationType.UPDATE, `school_classes/${classDoc.id}`);
     }
 
-    await writeAuditLog(actor, 'CLASS_STUDENT_CREATE', 'class_students', studentCode, `${className}: ${fullName}`);
+    await writeAuditLog(actor, 'CLASS_STUDENT_CREATE', 'class_students', studentCode, `${canonicalClass}: ${fullName}`);
     return jsonRes({ id: newId, studentCode, activeCount }, 201);
   }
 
   if (pathname === '/api/class-rosters' && method === 'PATCH') {
     if (!isStaff) return jsonRes({ error: 'Akses ditolak.' }, 403);
     const action = String(body?.action || 'update');
+    const classDocs = await ensureSchoolClassesDocs();
+
+    if (action === 'archive_class') {
+      const className = clampString(body?.className, 40);
+      const archiveSchedules = body?.archiveSchedules !== false;
+      const targetDoc = classDocs.find(
+        (c) => String(c.className).toLowerCase() === className.toLowerCase() && !c.archived
+      );
+      if (!targetDoc) {
+        return jsonRes({ error: 'Rombel kelas tidak ditemukan atau sudah diarsipkan.' }, 404);
+      }
+      const activeTotal = classDocs.filter((c) => !c.archived).length;
+      if (activeTotal <= 1) {
+        return jsonRes({ error: 'Minimal harus ada 1 rombel kelas aktif di sekolah.' }, 400);
+      }
+      try {
+        await updateDoc(doc(db, 'school_classes', targetDoc.id), {
+          archived: true,
+          updatedByUid: clampString(actor.uid, 128, 'system'),
+          updatedAt: serverTimestamp(),
+        });
+        await updateDoc(doc(db, 'public_classes', targetDoc.id), {
+          archived: true,
+          updatedAt: serverTimestamp(),
+        }).catch(() => {});
+        if (archiveSchedules) {
+          const scheds = await listCollection('reading_schedules', [where('archived', '==', false)]);
+          const matching = scheds.filter((s) => String(s.className) === String(targetDoc.className));
+          if (matching.length > 0) {
+            const batch = writeBatch(db);
+            for (const m of matching) {
+              batch.update(doc(db, 'reading_schedules', m.id), {
+                archived: true,
+                updatedAt: serverTimestamp(),
+              });
+            }
+            await batch.commit();
+          }
+        }
+      } catch (err) {
+        handleFirestoreError(err, OperationType.UPDATE, `school_classes/${targetDoc.id}`);
+      }
+      await writeAuditLog(
+        actor,
+        'CLASS_ROMBEL_ARCHIVE',
+        'school_classes',
+        String(targetDoc.className),
+        `Arsipkan rombel ${targetDoc.className}`
+      );
+      return jsonRes({ ok: true, className: String(targetDoc.className) });
+    }
+
+    if (action === 'restore_class') {
+      const className = clampString(body?.className, 40);
+      const targetDoc = classDocs.find(
+        (c) => String(c.className).toLowerCase() === className.toLowerCase()
+      );
+      if (!targetDoc) {
+        return jsonRes({ error: 'Rombel kelas tidak ditemukan.' }, 404);
+      }
+      try {
+        await updateDoc(doc(db, 'school_classes', targetDoc.id), {
+          archived: false,
+          updatedByUid: clampString(actor.uid, 128, 'system'),
+          updatedAt: serverTimestamp(),
+        });
+        await updateDoc(doc(db, 'public_classes', targetDoc.id), {
+          archived: false,
+          updatedAt: serverTimestamp(),
+        }).catch(() => {});
+      } catch (err) {
+        handleFirestoreError(err, OperationType.UPDATE, `school_classes/${targetDoc.id}`);
+      }
+      await writeAuditLog(
+        actor,
+        'CLASS_ROMBEL_RESTORE',
+        'school_classes',
+        String(targetDoc.className),
+        `Pulihkan rombel ${targetDoc.className}`
+      );
+      return jsonRes({ ok: true, className: String(targetDoc.className) });
+    }
+
     const studentId = String(body?.id || '').trim();
     if (!studentId) return jsonRes({ error: 'ID siswa tidak valid.' }, 400);
 
-    const classDocs = await ensureSchoolClassesDocs();
     let ownerClass: FsDoc | undefined;
     let stIdx = -1;
     for (const c of classDocs) {
@@ -4734,10 +6142,27 @@ async function dispatchFirestoreApiInner(
       }
     }
 
-    const [classDocs, catalogDocs] = await Promise.all([
+    const [allClassDocs, catalogDocs] = await Promise.all([
       ensureSchoolClassesDocs(),
       listCollection('public_catalog', [where('archived', '==', false)]),
     ]);
+
+    const activeClassDocs = allClassDocs.filter((c) => !c.archived);
+    const classes: Array<SdClassPreset & { activeStudentCount?: number; roomLabel?: string }> =
+      activeClassDocs.map((c) => {
+        const activeCount = Array.isArray(c.students)
+          ? (c.students as Array<Record<string, unknown>>).filter((s) => !s.archived).length
+          : 0;
+        return {
+          className: String(c.className || ''),
+          gradeLevel: Number(c.gradeLevel || 1),
+          homeroomTeacher: String(c.homeroomTeacher || ''),
+          companionTeacher: String(c.companionTeacher || ''),
+          studentCount: activeCount > 0 ? activeCount : 20,
+          activeStudentCount: activeCount,
+          roomLabel: String(c.roomLabel || ''),
+        };
+      });
 
     const sortedDocs = [...rawDocs].sort((a, b) => {
       const da = dayOrderMap[String(a.dayOfWeek)] || 7;
@@ -4746,11 +6171,11 @@ async function dispatchFirestoreApiInner(
       const ta = String(a.startTime || '');
       const tb = String(b.startTime || '');
       if (ta !== tb) return ta.localeCompare(tb);
-      return Number(a.gradeLevel || 0) - Number(b.gradeLevel || 0);
+      return compareClassNames(String(a.className || ''), String(b.className || ''));
     });
 
     const domainAll = sortedDocs.map(toScheduleDomain);
-    const coverage = computeClassCoverage(domainAll);
+    const coverage = computeClassCoverage(domainAll, classes);
     const summary = computeScheduleSummary(domainAll);
 
     const dayFilter = url.searchParams.get('day')?.trim() || '';
@@ -4828,19 +6253,6 @@ async function dispatchFirestoreApiInner(
       .sort((a, b) => b.session_date.localeCompare(a.session_date) || b.id - a.id)
       .slice(0, 60);
 
-    const classes = classDocs.map((c) => {
-      const activeCount = Array.isArray(c.students)
-        ? (c.students as Array<Record<string, unknown>>).filter((s) => !s.archived).length
-        : 10;
-      return {
-        className: String(c.className || ''),
-        gradeLevel: Number(c.gradeLevel || 1),
-        homeroomTeacher: String(c.homeroomTeacher || ''),
-        companionTeacher: String(c.companionTeacher || ''),
-        studentCount: activeCount || 10,
-      };
-    });
-
     const books = catalogDocs
       .map((b) => ({ id: Number(b.numericId), title: String(b.title || '') }))
       .sort((a, b) => a.title.localeCompare(b.title));
@@ -4859,25 +6271,40 @@ async function dispatchFirestoreApiInner(
 
   if (pathname === '/api/reading-schedules' && method === 'POST') {
     if (!isStaff) return jsonRes({ error: 'Akses ditolak.' }, 403);
-    const [allDocs, catalogDocs, classDocs] = await Promise.all([
+    const [allDocs, catalogDocs, allClassDocs] = await Promise.all([
       listCollection('reading_schedules'),
       listCollection('public_catalog', [where('archived', '==', false)]),
       ensureSchoolClassesDocs(),
     ]);
     const activeDocs = allDocs.filter((d) => !d.archived);
-    const classDocMap = new Map(classDocs.map((c) => [String(c.className), c]));
+    const activeClassDocs = allClassDocs.filter((c) => !c.archived);
+    const classDocMap = new Map(activeClassDocs.map((c) => [String(c.className), c]));
+
+    const liveClassPresets: SdClassPreset[] = activeClassDocs.map((c) => {
+      const activeCount = Array.isArray(c.students)
+        ? (c.students as Array<Record<string, unknown>>).filter((s) => !s.archived).length
+        : 0;
+      return {
+        className: String(c.className || ''),
+        gradeLevel: Number(c.gradeLevel || 1),
+        homeroomTeacher: String(c.homeroomTeacher || ''),
+        companionTeacher: String(c.companionTeacher || ''),
+        studentCount: activeCount > 0 ? activeCount : 20,
+      };
+    });
 
     if (body?.action === 'generate_missing') {
       const firstBook = catalogDocs[0];
       const slotsToCreate = buildAutoClassScheduleSlots(
         activeDocs.map(toScheduleDomain),
-        firstBook ? { id: Number(firstBook.numericId), title: String(firstBook.title || '') } : null
+        firstBook ? { id: Number(firstBook.numericId), title: String(firstBook.title || '') } : null,
+        liveClassPresets
       );
       if (slotsToCreate.length === 0) {
         return jsonRes({
           createdCount: 0,
           createdCodes: [],
-          message: 'Seluruh 12 kelas (Kelas 1A–6B) sudah memiliki jadwal baca aktif.',
+          message: `Seluruh ${liveClassPresets.length} rombel kelas sudah memiliki jadwal baca aktif.`,
         });
       }
 
@@ -4892,7 +6319,7 @@ async function dispatchFirestoreApiInner(
         const liveCls = classDocMap.get(slot.className);
         const activeCount = Array.isArray(liveCls?.students)
           ? (liveCls.students as Array<Record<string, unknown>>).filter((s) => !s.archived).length
-          : slot.studentCount;
+          : 0;
         batch.set(doc(db, 'reading_schedules', docId), {
           numericId: numId,
           scheduleCode: code,
@@ -4900,7 +6327,7 @@ async function dispatchFirestoreApiInner(
           gradeLevel: slot.gradeLevel,
           homeroomTeacher: clampString(liveCls?.homeroomTeacher || slot.homeroomTeacher, 120),
           companionTeacher: clampString(liveCls?.companionTeacher || slot.companionTeacher, 120),
-          studentCount: activeCount || slot.studentCount,
+          studentCount: activeCount > 0 ? activeCount : slot.studentCount,
           dayOfWeek: slot.dayOfWeek,
           scheduleDate: '',
           startTime: slot.startTime,
@@ -4962,8 +6389,8 @@ async function dispatchFirestoreApiInner(
     );
     const liveCount = Array.isArray(liveCls?.students)
       ? (liveCls.students as Array<Record<string, unknown>>).filter((s) => !s.archived).length
-      : 10;
-    const studentCount = Number(body?.studentCount || liveCount || 10);
+      : 0;
+    const studentCount = Number(body?.studentCount || liveCount || 20);
     const dayOfWeek = clampString(body?.dayOfWeek, 20);
     const scheduleDate = clampString(body?.scheduleDate, 32, '');
     const startTime = clampString(body?.startTime, 10);
@@ -5300,3 +6727,42 @@ async function dispatchFirestoreApiInner(
 
   return jsonRes({ error: `Endpoint ${pathname} belum tersedia di mode Firestore.` }, 404);
 }
+
+export async function fetchFirestorePublicClasses(): Promise<PublicClassOption[]> {
+  try {
+    const db = getFirestoreClient();
+    const snap = await getDocs(
+      query(collection(db, 'public_classes'), where('archived', '==', false))
+    );
+    if (!snap.empty) {
+      return snap.docs
+        .map((d) => {
+          const data = d.data();
+          const homeroom = normalizeTeacherDisplay(String(data.homeroomTeacher || ''));
+          const companion = normalizeTeacherDisplay(String(data.companionTeacher || ''));
+          return {
+            id: d.id,
+            className: String(data.className || ''),
+            gradeLevel: Number(data.gradeLevel || 1),
+            homeroomTeacher: homeroom,
+            companionTeacher: companion,
+            hasHomeroomTeacher: !isPlaceholderTeacherName(String(data.homeroomTeacher || '')),
+            hasCompanionTeacher: !isPlaceholderTeacherName(String(data.companionTeacher || '')),
+          };
+        })
+        .sort((a, b) => compareClassNames(a.className, b.className));
+    }
+  } catch {
+    // Fallback to seeded classes when unseeded or offline
+  }
+  return SEED_SCHOOL_CLASSES.map((sc) => ({
+    id: sc.id,
+    className: sc.className,
+    gradeLevel: sc.gradeLevel,
+    homeroomTeacher: normalizeTeacherDisplay(sc.homeroomTeacher),
+    companionTeacher: normalizeTeacherDisplay(sc.companionTeacher),
+    hasHomeroomTeacher: !isPlaceholderTeacherName(sc.homeroomTeacher),
+    hasCompanionTeacher: !isPlaceholderTeacherName(sc.companionTeacher),
+  })).sort((a, b) => compareClassNames(a.className, b.className));
+}
+

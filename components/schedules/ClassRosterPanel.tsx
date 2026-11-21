@@ -3,10 +3,13 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   Archive,
+  Building2,
+  CalendarDays,
   Download,
   Edit3,
   GraduationCap,
   Plus,
+  RotateCcw,
   UserCheck,
   Users,
 } from 'lucide-react';
@@ -27,6 +30,7 @@ import { gatewayFetch } from '@/lib/client/data-gateway';
 import { exportToCsv, exportToExcel, exportToPdf } from '@/lib/client/export';
 import { SD_CLASSES } from '@/lib/domain/reading-schedule-rules';
 import { cn } from '@/lib/utils';
+import { RombelFormModal, type RombelCreatedResult } from './RombelFormModal';
 import type { ClassStudentRow, SchoolClassInfo, StudentRecapRow } from './types';
 
 interface ClassRosterPanelProps {
@@ -43,24 +47,33 @@ export function ClassRosterPanel({
   const { library } = useAuth();
   const { showToast } = useToast();
   const [selectedClass, setSelectedClass] = useState<string>(
-    initialClassName && SD_CLASSES.some((c) => c.className === initialClassName)
-      ? initialClassName
-      : SD_CLASSES[0].className
+    initialClassName?.trim() || SD_CLASSES[0].className
   );
   const [classes, setClasses] = useState<SchoolClassInfo[]>([]);
+  const [showArchivedClasses, setShowArchivedClasses] = useState(false);
   const [students, setStudents] = useState<ClassStudentRow[]>([]);
   const [studentRecap, setStudentRecap] = useState<StudentRecapRow[]>([]);
   const [searchQ, setSearchQ] = useState('');
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
-  // Edit Wali Kelas & Guru Pendamping Modal
+  // Add Rombel Modal
+  const [rombelModalOpen, setRombelModalOpen] = useState(false);
+
+  // Edit Rombel (Wali Kelas, Guru Pendamping, Ruang, Catatan) Modal
   const [teacherModalOpen, setTeacherModalOpen] = useState(false);
   const [editHomeroom, setEditHomeroom] = useState('');
   const [editCompanion, setEditCompanion] = useState('');
+  const [editRoomLabel, setEditRoomLabel] = useState('');
+  const [editClassNotes, setEditClassNotes] = useState('');
   const [syncSchedules, setSyncSchedules] = useState(true);
   const [savingTeachers, setSavingTeachers] = useState(false);
   const [teacherError, setTeacherError] = useState<string | null>(null);
+
+  // Archive / Restore Rombel
+  const [archiveRombelOpen, setArchiveRombelOpen] = useState(false);
+  const [archivingRombel, setArchivingRombel] = useState(false);
+  const [restoringClass, setRestoringClass] = useState<string | null>(null);
 
   // Add / Edit Student Modal
   const [studentModalOpen, setStudentModalOpen] = useState(false);
@@ -76,18 +89,31 @@ export function ClassRosterPanel({
   const [archiveStudentTarget, setArchiveStudentTarget] = useState<ClassStudentRow | null>(null);
   const [archivingStudent, setArchivingStudent] = useState(false);
 
-  const loadRoster = useCallback(async (className: string) => {
+  const loadRoster = useCallback(async (className: string, includeArchived = false) => {
     try {
-      const res = await gatewayFetch(
-        `/api/class-rosters?className=${encodeURIComponent(className)}`,
-        { cache: 'no-store' }
-      );
+      const qs = new URLSearchParams({ className });
+      if (includeArchived) qs.set('includeArchived', '1');
+      const res = await gatewayFetch(`/api/class-rosters?${qs.toString()}`, {
+        cache: 'no-store',
+      });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || 'Gagal memuat data kelas dan siswa.');
-      setClasses(data.classes || []);
+      const loadedClasses: SchoolClassInfo[] = data.classes || [];
+      setClasses(loadedClasses);
       setStudents(data.students || []);
       setStudentRecap(data.studentRecap || []);
       setError(null);
+
+      // If selected class is no longer in visible list, switch to first active class
+      if (
+        loadedClasses.length > 0 &&
+        !loadedClasses.some((c) => c.className === className)
+      ) {
+        const firstActive = loadedClasses.find((c) => !c.archived) || loadedClasses[0];
+        if (firstActive) {
+          setSelectedClass(firstActive.className);
+        }
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Gagal memuat data kelas.');
     } finally {
@@ -97,14 +123,17 @@ export function ClassRosterPanel({
 
   useEffect(() => {
     let active = true;
-    gatewayFetch(`/api/class-rosters?className=${encodeURIComponent(selectedClass)}`, {
+    const qs = new URLSearchParams({ className: selectedClass });
+    if (showArchivedClasses) qs.set('includeArchived', '1');
+    gatewayFetch(`/api/class-rosters?${qs.toString()}`, {
       cache: 'no-store',
     })
       .then(async (res) => {
         const data = await res.json();
         if (!res.ok) throw new Error(data.error || 'Gagal memuat data kelas dan siswa.');
         if (!active) return;
-        setClasses(data.classes || []);
+        const loadedClasses: SchoolClassInfo[] = data.classes || [];
+        setClasses(loadedClasses);
         setStudents(data.students || []);
         setStudentRecap(data.studentRecap || []);
         setError(null);
@@ -119,9 +148,19 @@ export function ClassRosterPanel({
     return () => {
       active = false;
     };
-  }, [selectedClass]);
+  }, [selectedClass, showArchivedClasses]);
 
-  const currentClassInfo = useMemo(() => {
+  const activeClasses = useMemo(
+    () => classes.filter((c) => !c.archived),
+    [classes]
+  );
+
+  const archivedClasses = useMemo(
+    () => classes.filter((c) => Boolean(c.archived)),
+    [classes]
+  );
+
+  const currentClassInfo = useMemo<SchoolClassInfo>(() => {
     const found = classes.find((c) => c.className === selectedClass);
     if (found) return found;
     const preset = SD_CLASSES.find((c) => c.className === selectedClass) || SD_CLASSES[0];
@@ -130,7 +169,10 @@ export function ClassRosterPanel({
       gradeLevel: preset.gradeLevel,
       homeroomTeacher: preset.homeroomTeacher,
       companionTeacher: preset.companionTeacher,
-      activeStudentCount: students.length || preset.studentCount,
+      roomLabel: '',
+      notes: '',
+      archived: false,
+      activeStudentCount: students.length,
     };
   }, [classes, selectedClass, students.length]);
 
@@ -181,6 +223,8 @@ export function ClassRosterPanel({
   function openTeacherModal() {
     setEditHomeroom(currentClassInfo.homeroomTeacher);
     setEditCompanion(currentClassInfo.companionTeacher);
+    setEditRoomLabel(currentClassInfo.roomLabel || '');
+    setEditClassNotes(currentClassInfo.notes || '');
     setSyncSchedules(true);
     setTeacherError(null);
     setTeacherModalOpen(true);
@@ -198,27 +242,100 @@ export function ClassRosterPanel({
           className: selectedClass,
           homeroomTeacher: editHomeroom.trim(),
           companionTeacher: editCompanion.trim(),
+          roomLabel: editRoomLabel.trim(),
+          notes: editClassNotes.trim(),
           syncSchedules,
         }),
       });
       const data = await res.json();
       if (!res.ok) {
-        setTeacherError(data.error || 'Gagal menyimpan data wali kelas & pendamping.');
+        setTeacherError(data.error || 'Gagal menyimpan informasi rombel kelas.');
         return;
       }
       showToast(
         'success',
-        'Wali kelas & pendamping diperbarui',
+        'Informasi rombel diperbarui',
         `${selectedClass}: ${editHomeroom.trim()} & ${editCompanion.trim()}`
       );
       setTeacherModalOpen(false);
-      await loadRoster(selectedClass);
+      await loadRoster(selectedClass, showArchivedClasses);
       if (onDataChanged) await onDataChanged();
     } catch (err) {
-      setTeacherError(err instanceof Error ? err.message : 'Gagal menyimpan data guru.');
+      setTeacherError(err instanceof Error ? err.message : 'Gagal menyimpan data rombel.');
     } finally {
       setSavingTeachers(false);
     }
+  }
+
+  async function handleConfirmArchiveRombel() {
+    setArchivingRombel(true);
+    try {
+      const res = await gatewayFetch('/api/class-rosters', {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          action: 'archive_class',
+          className: selectedClass,
+          archiveSchedules: true,
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Gagal mengarsipkan rombel.');
+      showToast(
+        'success',
+        'Rombel diarsipkan',
+        `${selectedClass} telah diarsipkan. Riwayat absensi & sesi sebelumnya tetap aman.`
+      );
+      setArchiveRombelOpen(false);
+      const nextActive = activeClasses.find((c) => c.className !== selectedClass);
+      const nextTarget = nextActive?.className || SD_CLASSES[0].className;
+      setSelectedClass(nextTarget);
+      await loadRoster(nextTarget, showArchivedClasses);
+      if (onDataChanged) await onDataChanged();
+    } catch (err) {
+      showToast(
+        'error',
+        'Gagal mengarsipkan rombel',
+        err instanceof Error ? err.message : 'Terjadi kesalahan.'
+      );
+    } finally {
+      setArchivingRombel(false);
+    }
+  }
+
+  async function handleRestoreRombel(className: string) {
+    setRestoringClass(className);
+    try {
+      const res = await gatewayFetch('/api/class-rosters', {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          action: 'restore_class',
+          className,
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Gagal memulihkan rombel.');
+      showToast('success', 'Rombel dipulihkan', `${className} kembali aktif di seluruh sistem.`);
+      setSelectedClass(className);
+      await loadRoster(className, showArchivedClasses);
+      if (onDataChanged) await onDataChanged();
+    } catch (err) {
+      showToast(
+        'error',
+        'Gagal memulihkan rombel',
+        err instanceof Error ? err.message : 'Terjadi kesalahan.'
+      );
+    } finally {
+      setRestoringClass(null);
+    }
+  }
+
+  async function handleRombelCreated(result: RombelCreatedResult) {
+    setLoading(true);
+    setSelectedClass(result.className);
+    await loadRoster(result.className, showArchivedClasses);
+    if (onDataChanged) await onDataChanged();
   }
 
   function openAddStudentModal() {
@@ -280,7 +397,7 @@ export function ClassRosterPanel({
         `${stName.trim()} (${selectedClass})`
       );
       setStudentModalOpen(false);
-      await loadRoster(selectedClass);
+      await loadRoster(selectedClass, showArchivedClasses);
       if (onDataChanged) await onDataChanged();
     } catch (err) {
       setStudentError(err instanceof Error ? err.message : 'Gagal menyimpan data siswa.');
@@ -309,7 +426,7 @@ export function ClassRosterPanel({
         `${archiveStudentTarget.fullName} tidak lagi aktif di ${selectedClass}.`
       );
       setArchiveStudentTarget(null);
-      await loadRoster(selectedClass);
+      await loadRoster(selectedClass, showArchivedClasses);
       if (onDataChanged) await onDataChanged();
     } catch (err) {
       showToast(
@@ -322,8 +439,8 @@ export function ClassRosterPanel({
     }
   }
 
-  const classButtons = useMemo(() => {
-    if (classes.length > 0) return classes;
+  const classButtons = useMemo<SchoolClassInfo[]>(() => {
+    if (activeClasses.length > 0) return activeClasses;
     return SD_CLASSES.map((c) => ({
       className: c.className,
       gradeLevel: c.gradeLevel,
@@ -331,31 +448,48 @@ export function ClassRosterPanel({
       companionTeacher: c.companionTeacher,
       activeStudentCount: c.studentCount,
     }));
-  }, [classes]);
+  }, [activeClasses]);
 
   return (
     <div className="space-y-5">
-      {/* 12-Class Selector */}
+      {/* Dynamic Rombel Selector */}
       <section className="rounded-xl border border-[#E7E4DC] bg-[#FAF9F5] p-4 space-y-3">
-        <div className="flex flex-wrap items-center justify-between gap-2">
+        <div className="flex flex-wrap items-center justify-between gap-3">
           <div>
             <h2 className="font-serif text-base font-semibold text-[#1E2433]">
-              Daftar Kelas SD, Wali Kelas, Pendamping &amp; Data Siswa
+              Daftar Rombel Kelas SD, Wali Kelas, Pendamping &amp; Data Siswa
             </h2>
             <p className="text-xs text-[#5C5E64]">
-              Pilih kelas untuk melihat atau mengelola wali kelas, guru pendamping, daftar siswa, serta rekap kehadiran literasi tiap siswa.
+              Pilih rombel untuk mengelola wali kelas, guru pendamping, dan daftar siswa, atau tambahkan rombel baru seperti Kelas 6D.
             </p>
           </div>
-          <span className="font-mono text-xs text-[#5C5E64] tabular-nums">
-            {classButtons.length} kelas ·{' '}
-            {classButtons.reduce((sum, c) => sum + c.activeStudentCount, 0)} siswa aktif
-          </span>
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="font-mono text-xs text-[#5C5E64] tabular-nums">
+              {classButtons.length} rombel ·{' '}
+              {classButtons.reduce((sum, c) => sum + c.activeStudentCount, 0)} siswa aktif
+            </span>
+            {canWrite && (
+              <>
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  onClick={() => setShowArchivedClasses((prev) => !prev)}
+                >
+                  {showArchivedClasses ? 'Sembunyikan Arsip' : 'Lihat Arsip'}
+                </Button>
+                <Button size="sm" onClick={() => setRombelModalOpen(true)}>
+                  <Plus className="h-3.5 w-3.5" />
+                  Tambah Rombel
+                </Button>
+              </>
+            )}
+          </div>
         </div>
 
-        <div className="grid grid-cols-3 gap-2 sm:grid-cols-4 md:grid-cols-6 lg:grid-cols-12">
+        <div className="grid grid-cols-3 gap-2 sm:grid-cols-4 md:grid-cols-6 xl:grid-cols-8">
           {classButtons.map((cls) => {
             const isSelected = cls.className === selectedClass;
-            const shortLabel = cls.className.replace('Kelas ', '');
+            const shortLabel = cls.className.replace(/^Kelas\s+/i, '');
             return (
               <button
                 key={cls.className}
@@ -371,7 +505,9 @@ export function ClassRosterPanel({
                     : 'border-[#E2DFD7] bg-white hover:bg-[#EFECE3]/70 text-[#1E2433]'
                 )}
               >
-                <span className="font-mono text-xs font-semibold tabular-nums">{shortLabel}</span>
+                <span className="font-mono text-xs font-semibold tabular-nums truncate w-full">
+                  {shortLabel}
+                </span>
                 <span
                   className={cn(
                     'mt-0.5 font-mono text-[11px] tabular-nums',
@@ -384,13 +520,42 @@ export function ClassRosterPanel({
             );
           })}
         </div>
+
+        {showArchivedClasses && archivedClasses.length > 0 && (
+          <div className="rounded-xl border border-dashed border-[#D6D2C7] bg-[#F4F3EE]/80 p-3 space-y-2">
+            <p className="text-[11px] font-semibold uppercase tracking-wide text-[#5C5E64]">
+              Rombel Diarsipkan ({archivedClasses.length})
+            </p>
+            <div className="flex flex-wrap gap-2">
+              {archivedClasses.map((cls) => (
+                <div
+                  key={cls.className}
+                  className="inline-flex items-center gap-2 rounded-lg border border-[#DFDCD3] bg-white px-3 py-1.5 text-xs"
+                >
+                  <span className="font-medium text-[#5C5E64]">{cls.className}</span>
+                  {canWrite && (
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      loading={restoringClass === cls.className}
+                      onClick={() => handleRestoreRombel(cls.className)}
+                    >
+                      <RotateCcw className="h-3 w-3" />
+                      Pulihkan
+                    </Button>
+                  )}
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
       </section>
 
-      {/* Selected Class Leadership Card (Wali Kelas + Pendamping) */}
+      {/* Selected Class Leadership Card (Wali Kelas + Pendamping + Room) */}
       <section className="rounded-xl border border-[#E7E4DC] bg-[#FAF9F5] p-5">
-        <div className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
-          <div className="space-y-3">
-            <div className="flex flex-wrap items-center gap-2.5">
+        <div className="flex flex-col gap-4 md:flex-row md:items-start md:justify-between">
+          <div className="space-y-3 flex-1 min-w-0">
+            <div className="flex flex-wrap items-center gap-2">
               <h3 className="font-serif text-xl font-semibold text-[#1E2433]">
                 {currentClassInfo.className}
               </h3>
@@ -398,8 +563,20 @@ export function ClassRosterPanel({
                 Tingkat {currentClassInfo.gradeLevel}
               </span>
               <span className="rounded-full border border-emerald-200 bg-emerald-50 px-2.5 py-0.5 font-mono text-xs font-medium text-emerald-800 tabular-nums">
-                {students.length} siswa aktif
+                {students.length} siswa rombel
               </span>
+              {typeof currentClassInfo.scheduleCount === 'number' && (
+                <span className="inline-flex items-center gap-1 rounded-full border border-[#E2DFD7] bg-white px-2.5 py-0.5 font-mono text-xs text-[#4A4945] tabular-nums">
+                  <CalendarDays className="h-3 w-3 text-[#E56B63]" />
+                  {currentClassInfo.scheduleCount} jadwal aktif
+                </span>
+              )}
+              {currentClassInfo.roomLabel && (
+                <span className="inline-flex items-center gap-1 rounded-full border border-[#E2DFD7] bg-white px-2.5 py-0.5 text-xs text-[#4A4945]">
+                  <Building2 className="h-3 w-3 text-[#222B3A]" />
+                  {currentClassInfo.roomLabel}
+                </span>
+              )}
             </div>
 
             <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
@@ -426,18 +603,36 @@ export function ClassRosterPanel({
                 </div>
               </div>
             </div>
+
+            {currentClassInfo.notes && (
+              <p className="text-xs text-[#5C5E64]">
+                <strong className="font-medium text-[#1E2433]">Catatan Rombel:</strong>{' '}
+                {currentClassInfo.notes}
+              </p>
+            )}
           </div>
 
           {canWrite && (
             <div className="flex flex-wrap items-center gap-2 shrink-0">
               <Button variant="secondary" size="sm" onClick={openTeacherModal}>
                 <Edit3 className="h-3.5 w-3.5" />
-                Edit Wali &amp; Pendamping
+                Edit Rombel &amp; Guru
               </Button>
               <Button size="sm" onClick={openAddStudentModal}>
                 <Plus className="h-3.5 w-3.5" />
                 Tambah Siswa
               </Button>
+              {activeClasses.length > 1 && !currentClassInfo.archived && (
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  onClick={() => setArchiveRombelOpen(true)}
+                  aria-label={`Arsipkan rombel ${currentClassInfo.className}`}
+                >
+                  <Archive className="h-3.5 w-3.5 text-[#C94A43]" />
+                  Arsipkan
+                </Button>
+              )}
             </div>
           )}
         </div>
@@ -500,12 +695,12 @@ export function ClassRosterPanel({
 
       {/* Student Roster & Cumulative Attendance Recap Table */}
       {loading && <LoadingState rows={6} />}
-      {error && <ErrorState message={error} onRetry={() => loadRoster(selectedClass)} />}
+      {error && <ErrorState message={error} onRetry={() => loadRoster(selectedClass, showArchivedClasses)} />}
 
       {!loading && !error && filteredStudents.length === 0 && (
         <EmptyState
-          title={`Belum ada siswa pada filter ${selectedClass}`}
-          description="Tambahkan data siswa atau ubah kata kunci pencarian untuk melihat daftar absensi kelas."
+          title={`Belum ada siswa pada ${selectedClass}`}
+          description="Tambahkan data siswa ke rombel ini agar daftar absensi sesi baca kelas otomatis terisi."
           action={
             canWrite ? (
               <Button onClick={openAddStudentModal}>
@@ -621,12 +816,20 @@ export function ClassRosterPanel({
         </div>
       )}
 
-      {/* EDIT WALI KELAS & GURU PENDAMPING MODAL */}
+      {/* ADD NEW ROMBEL MODAL */}
+      <RombelFormModal
+        open={rombelModalOpen}
+        onClose={() => setRombelModalOpen(false)}
+        existingClassNames={classButtons.map((c) => c.className)}
+        onCreated={handleRombelCreated}
+      />
+
+      {/* EDIT ROMBEL & GURU MODAL */}
       <Modal
         open={teacherModalOpen}
         onClose={() => setTeacherModalOpen(false)}
-        title={`Edit Wali Kelas & Pendamping · ${selectedClass}`}
-        description="Perbarui nama wali kelas dan guru pendamping literasi untuk kelas ini."
+        title={`Edit Rombel & Guru · ${selectedClass}`}
+        description="Perbarui wali kelas, guru pendamping, lokasi ruang kelas, dan catatan rombel."
         maxWidth="max-w-lg"
       >
         <form onSubmit={handleSaveTeachers} className="space-y-4">
@@ -649,6 +852,20 @@ export function ClassRosterPanel({
             placeholder="Misal: Ibu Laila Nurul, S.Pd."
             required
           />
+          <TextField
+            label="Ruang Kelas (opsional)"
+            value={editRoomLabel}
+            onChange={(e) => setEditRoomLabel(e.target.value)}
+            placeholder="Misal: Gedung B Lt. 2"
+            maxLength={60}
+          />
+          <TextField
+            label="Catatan Rombel (opsional)"
+            value={editClassNotes}
+            onChange={(e) => setEditClassNotes(e.target.value)}
+            placeholder="Catatan tambahan untuk rombel ini"
+            maxLength={240}
+          />
           <label className="flex items-start gap-2.5 rounded-xl border border-[#E7E4DC] bg-white p-3 text-xs text-[#4A4945] cursor-pointer">
             <input
               type="checkbox"
@@ -666,7 +883,7 @@ export function ClassRosterPanel({
               Batal
             </Button>
             <Button type="submit" loading={savingTeachers}>
-              Simpan Data Guru
+              Simpan Perubahan
             </Button>
           </div>
         </form>
@@ -729,6 +946,17 @@ export function ClassRosterPanel({
           </div>
         </form>
       </Modal>
+
+      {/* ARCHIVE ROMBEL CONFIRM */}
+      <ConfirmDialog
+        open={archiveRombelOpen}
+        onClose={() => setArchiveRombelOpen(false)}
+        onConfirm={handleConfirmArchiveRombel}
+        title={`Arsipkan Rombel ${selectedClass}?`}
+        message={`Rombel ${selectedClass} beserta jadwal baca aktifnya akan diarsipkan. Riwayat absensi, catatan sesi, dan data anggota tetap aman dan rombel dapat dipulihkan kapan saja.`}
+        confirmLabel="Arsipkan Rombel"
+        loading={archivingRombel}
+      />
 
       {/* ARCHIVE STUDENT CONFIRM */}
       <ConfirmDialog

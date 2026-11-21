@@ -542,7 +542,7 @@ export function LibrarySpreadView({
             <span>
               {canReadSchedules
                 ? `Jadwal Semua Kelas (${selectedDaySchedules.length} sesi ${selectedIndoDay || 'hari ini'}) →`
-                : 'Jadwal Baca Semua Kelas (1A–6B) →'}
+                : 'Jadwal Baca Semua Rombel Kelas →'}
             </span>
           </Link>
         </div>
@@ -1038,7 +1038,7 @@ export function LibrarySpreadView({
           </div>
 
           {/* RIGHT CONTEXT PANEL (#FAF9F5 — hidden below xl and hosted in hamburger menu instead) */}
-          <aside className="hidden xl:flex xl:w-[392px] shrink-0 border-l border-[#EAE7DF] bg-[#FAF9F5] px-8 py-5 flex-col justify-between gap-4">
+          <aside className="hidden xl:flex xl:w-[392px] shrink-0 border-l border-[#EAE7DF] bg-[#FAF9F5] px-8 py-5 flex-col justify-start divide-y divide-[#EAE7DF] [&>*]:py-4 [&>*:first-child]:pt-0 [&>*:last-child]:pb-0">
             {/* Top Right: User Chip + Bell + Logout */}
             <div className="flex items-center justify-between gap-3">
               {user ? (

@@ -295,7 +295,7 @@ export function AppShell({
                 </nav>
 
                 {drawerExtra && (
-                  <div className="xl:hidden border-t border-[#E7E4DC] px-4 py-5 space-y-5 bg-[#FAF9F5]">
+                  <div className="xl:hidden border-t border-[#E7E4DC] bg-[#FAF9F5] px-4 py-3.5 divide-y divide-[#EAE7DF] [&>*]:py-3.5 [&>*:first-child]:pt-0 [&>*:last-child]:pb-0">
                     {typeof drawerExtra === 'function'
                       ? drawerExtra(() => setDrawerOpen(false))
                       : drawerExtra}

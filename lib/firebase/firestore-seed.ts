@@ -639,12 +639,21 @@ async function runSeedIfNeeded(staffUid: string, staffName: string): Promise<voi
     });
   }
 
-  // 14b. School Classes (Wali Kelas, Guru Pendamping & 10 Siswa per Kelas)
+  // 14b. School Classes (Wali Kelas, Guru Pendamping & 10 Siswa per Kelas) + Public Classes Projection
   for (const sc of SEED_SCHOOL_CLASSES) {
     const { id, ...rest } = sc;
     batch.set(doc(db, 'school_classes', id), {
       ...rest,
       updatedByUid: safeUid,
+      createdAt: serverTimestamp(),
+      updatedAt: serverTimestamp(),
+    });
+    batch.set(doc(db, 'public_classes', id), {
+      className: rest.className,
+      gradeLevel: rest.gradeLevel,
+      homeroomTeacher: rest.homeroomTeacher,
+      companionTeacher: rest.companionTeacher,
+      archived: false,
       createdAt: serverTimestamp(),
       updatedAt: serverTimestamp(),
     });

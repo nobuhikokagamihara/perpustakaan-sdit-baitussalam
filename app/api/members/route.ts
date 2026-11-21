@@ -4,6 +4,7 @@ import { requirePermission } from '@/lib/auth/session';
 import { logAudit } from '@/lib/db/audit';
 import { generateNextMemberCode } from '@/lib/db/member-link';
 import { formatIsoDate, addDaysIso } from '@/lib/domain/library-rules';
+import { compareClassNames } from '@/lib/domain/reading-schedule-rules';
 
 export async function GET(req: NextRequest) {
   const guard = await requirePermission('members.read');
@@ -14,6 +15,7 @@ export async function GET(req: NextRequest) {
   const q = (sp.get('q') || '').trim();
   const status = sp.get('status') || '';
   const typeId = sp.get('typeId') || '';
+  const className = (sp.get('className') || '').trim();
   const archivedMode = sp.get('archived') || 'exclude';
 
   let where =
@@ -37,6 +39,10 @@ export async function GET(req: NextRequest) {
     where += ' AND m.membership_type_id = ?';
     params.push(Number(typeId));
   }
+  if (className) {
+    where += ' AND LOWER(TRIM(m.unit_or_class)) = LOWER(TRIM(?))';
+    params.push(className);
+  }
 
   const members = db
     .prepare(
@@ -53,7 +59,30 @@ export async function GET(req: NextRequest) {
     .all(...params);
 
   const membershipTypes = db.prepare('SELECT * FROM membership_types ORDER BY id ASC').all();
-  return NextResponse.json({ members, membershipTypes });
+  const rawClasses = db
+    .prepare(
+      `SELECT class_name, grade_level, homeroom_teacher, companion_teacher, room_label
+       FROM school_classes
+       WHERE archived_at IS NULL
+       ORDER BY grade_level ASC, class_name ASC`
+    )
+    .all() as Array<{
+    class_name: string;
+    grade_level: number;
+    homeroom_teacher: string;
+    companion_teacher: string;
+    room_label: string;
+  }>;
+  rawClasses.sort((a, b) => compareClassNames(a.class_name, b.class_name));
+  const schoolClasses = rawClasses.map((c) => ({
+    className: c.class_name,
+    gradeLevel: c.grade_level,
+    homeroomTeacher: c.homeroom_teacher,
+    companionTeacher: c.companion_teacher,
+    roomLabel: c.room_label || '',
+  }));
+
+  return NextResponse.json({ members, membershipTypes, schoolClasses });
 }
 
 export async function POST(req: NextRequest) {

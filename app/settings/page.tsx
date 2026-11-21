@@ -137,13 +137,16 @@ function SettingsContent() {
             >
               <Icon className="h-3.5 w-3.5" />
               {t.label}
-              {t.key === 'users' &&
-                data?.users &&
-                data.users.filter((u) => u.approval_status === 'pending').length > 0 && (
+              {t.key === 'users' && (() => {
+                const pendingCount =
+                  (data?.registrationRequests?.filter((r) => r.status === 'pending').length || 0) +
+                  (data?.users?.filter((u) => u.approval_status === 'pending').length || 0);
+                return pendingCount > 0 ? (
                   <span className="ml-0.5 rounded-full bg-[#E56B63] px-1.5 py-0.5 font-mono text-[10px] font-semibold text-white tabular-nums">
-                    {data.users.filter((u) => u.approval_status === 'pending').length}
+                    {pendingCount}
                   </span>
-                )}
+                ) : null;
+              })()}
               {t.key === 'backup' && data?.backupSummary && (
                 <span
                   className={`ml-0.5 font-mono text-[10px] tabular-nums ${
@@ -202,6 +205,8 @@ function SettingsContent() {
             <UsersManagementTab
               users={data.users}
               roles={data.roles}
+              registrationRequests={data.registrationRequests || []}
+              schoolClasses={data.schoolClasses || []}
               currentUserId={user?.id}
               currentUserRoleSlug={user?.roleSlug}
               isFirebaseMode={isFirebaseMode}
@@ -216,6 +221,7 @@ function SettingsContent() {
           {tab === 'backup' && (
             <BackupCenterTab
               canWrite={canWrite}
+              currentUserRoleSlug={user?.roleSlug}
               onSystemMutated={handleSettingsMutated}
               notify={notify}
             />

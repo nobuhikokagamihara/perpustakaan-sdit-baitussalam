@@ -158,21 +158,50 @@ export function StatusIndicator({ status }: { status: string }) {
   const s = status.toLowerCase();
   let tone = 'bg-[#EFECE3] text-[#4A4945]';
   if (
-    ['tersedia', 'aktif', 'selesai', 'lunas', 'tepat waktu', 'dikembalikan', 'disetujui', 'diterima', 'baik', 'ditemukan'].includes(
-      s
-    )
+    [
+      'tersedia',
+      'aktif',
+      'selesai',
+      'lunas',
+      'tepat waktu',
+      'dikembalikan',
+      'disetujui',
+      'diterima',
+      'baik',
+      'ditemukan',
+      'backup terpenuhi',
+    ].includes(s)
   ) {
     tone = 'bg-emerald-50 text-emerald-800';
   } else if (
-    ['dipinjam', 'dipesan', 'diajukan', 'menunggu', 'menunggu persetujuan', 'sebagian', 'sebagian kembali', 'diterima sebagian', 'rusak ringan', 'direservasi'].includes(
-      s
-    )
+    [
+      'dipinjam',
+      'dipesan',
+      'diajukan',
+      'menunggu',
+      'menunggu persetujuan',
+      'sebagian',
+      'sebagian kembali',
+      'diterima sebagian',
+      'rusak ringan',
+      'direservasi',
+      'dikembalikan (terlambat)',
+    ].includes(s)
   ) {
     tone = 'bg-amber-50 text-amber-800';
   } else if (
-    ['terlambat', 'diblokir', 'belum lunas', 'hilang', 'rusak', 'rusak berat', 'ditolak', 'kedaluwarsa', 'tidak ditemukan'].includes(
-      s
-    )
+    [
+      'terlambat',
+      'diblokir',
+      'belum lunas',
+      'hilang',
+      'rusak',
+      'rusak berat',
+      'ditolak',
+      'kedaluwarsa',
+      'tidak ditemukan',
+      'wajib backup dahulu',
+    ].includes(s)
   ) {
     tone = 'bg-[#FDF0EF] text-[#C94A43]';
   } else if (['dibebaskan', 'diambil', 'nonaktif', 'dibatalkan', 'perbaikan'].includes(s)) {
@@ -267,12 +296,12 @@ export function Modal({
             exit="exit"
             transition={{ duration: MOTION_DURATION.normal, ease: EASE_EDITORIAL }}
             className={cn(
-              'max-h-[90vh] w-full overflow-y-auto rounded-2xl border border-[#E2DFD7] bg-[#FAF9F5] shadow-2xl',
+              'flex max-h-[90vh] w-full flex-col overflow-hidden rounded-2xl border border-[#E2DFD7] bg-[#FAF9F5] shadow-2xl print:max-h-none print:overflow-visible',
               maxWidth
             )}
           >
-            <div className="flex items-start justify-between gap-4 border-b border-[#E7E4DC] px-6 py-4">
-              <div>
+            <div className="flex shrink-0 items-start justify-between gap-4 border-b border-[#E7E4DC] bg-[#FAF9F5] px-6 py-4">
+              <div className="min-w-0">
                 <h2 id="modal-title" className="font-serif text-lg font-semibold text-[#1E2433]">
                   {title}
                 </h2>
@@ -282,12 +311,14 @@ export function Modal({
                 type="button"
                 onClick={onClose}
                 aria-label="Tutup dialog"
-                className="rounded-full p-1.5 text-[#7B7D82] hover:bg-[#EFECE3] hover:text-[#1E2433] cursor-pointer"
+                className="shrink-0 rounded-full p-1.5 text-[#7B7D82] hover:bg-[#EFECE3] hover:text-[#1E2433] cursor-pointer"
               >
                 <X className="h-4 w-4" />
               </button>
             </div>
-            <div className="p-6">{children}</div>
+            <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain p-6 print:overflow-visible">
+              {children}
+            </div>
           </motion.div>
         </motion.div>
       )}

@@ -7,6 +7,7 @@ import {
   READING_DAYS,
   SD_CLASSES,
   buildAutoClassScheduleSlots,
+  compareClassNames,
   computeClassCoverage,
   computeScheduleSummary,
   detectScheduleConflict,
@@ -17,6 +18,7 @@ import {
   type AttendanceRecordItem,
   type AttendanceStatus,
   type ReadingScheduleRecord,
+  type SdClassPreset,
 } from '@/lib/domain/reading-schedule-rules';
 
 interface SqlScheduleRow {
@@ -83,6 +85,7 @@ interface SqlClassInfoRow {
   grade_level: number;
   homeroom_teacher: string;
   companion_teacher: string;
+  room_label: string;
   active_student_count: number;
 }
 
@@ -146,8 +149,33 @@ export async function GET(req: NextRequest) {
     )
     .all() as SqlScheduleRow[];
 
+  const liveClasses = db
+    .prepare(
+      `SELECT sc.class_name, sc.grade_level, sc.homeroom_teacher, sc.companion_teacher, sc.room_label,
+              (SELECT COUNT(*) FROM class_students cs WHERE cs.class_name = sc.class_name AND cs.archived_at IS NULL) as active_student_count
+       FROM school_classes sc
+       WHERE sc.archived_at IS NULL
+       ORDER BY sc.grade_level ASC, sc.class_name ASC`
+    )
+    .all() as SqlClassInfoRow[];
+
+  liveClasses.sort((a, b) => compareClassNames(a.class_name, b.class_name));
+
+  const classes: Array<SdClassPreset & { activeStudentCount?: number; roomLabel?: string }> =
+    liveClasses.length > 0
+      ? liveClasses.map((c) => ({
+          className: c.class_name,
+          gradeLevel: c.grade_level,
+          homeroomTeacher: c.homeroom_teacher,
+          companionTeacher: c.companion_teacher,
+          studentCount: c.active_student_count > 0 ? c.active_student_count : 20,
+          activeStudentCount: c.active_student_count,
+          roomLabel: c.room_label || '',
+        }))
+      : [...SD_CLASSES];
+
   const domainAll = allRows.map(toDomainRecord);
-  const coverage = computeClassCoverage(domainAll);
+  const coverage = computeClassCoverage(domainAll, classes);
   const summary = computeScheduleSummary(domainAll);
 
   const filtered = allRows.filter((row) => {
@@ -221,26 +249,6 @@ export async function GET(req: NextRequest) {
     };
   });
 
-  const liveClasses = db
-    .prepare(
-      `SELECT sc.class_name, sc.grade_level, sc.homeroom_teacher, sc.companion_teacher,
-              (SELECT COUNT(*) FROM class_students cs WHERE cs.class_name = sc.class_name AND cs.archived_at IS NULL) as active_student_count
-       FROM school_classes sc
-       ORDER BY sc.grade_level ASC, sc.class_name ASC`
-    )
-    .all() as SqlClassInfoRow[];
-
-  const classes =
-    liveClasses.length > 0
-      ? liveClasses.map((c) => ({
-          className: c.class_name,
-          gradeLevel: c.grade_level,
-          homeroomTeacher: c.homeroom_teacher,
-          companionTeacher: c.companion_teacher,
-          studentCount: c.active_student_count || 10,
-        }))
-      : SD_CLASSES;
-
   const books = db
     .prepare('SELECT id, title FROM books WHERE archived_at IS NULL ORDER BY title ASC')
     .all() as Array<{ id: number; title: string }>;
@@ -279,32 +287,48 @@ export async function POST(req: NextRequest) {
         .prepare('SELECT id, title FROM books WHERE archived_at IS NULL ORDER BY id ASC LIMIT 1')
         .get() as { id: number; title: string } | undefined;
 
+      const liveClassRows = db
+        .prepare(
+          `SELECT sc.class_name, sc.grade_level, sc.homeroom_teacher, sc.companion_teacher,
+                  (SELECT COUNT(*) FROM class_students cs WHERE cs.class_name = sc.class_name AND cs.archived_at IS NULL) as active_student_count
+           FROM school_classes sc
+           WHERE sc.archived_at IS NULL
+           ORDER BY sc.grade_level ASC, sc.class_name ASC`
+        )
+        .all() as Array<{
+        class_name: string;
+        grade_level: number;
+        homeroom_teacher: string;
+        companion_teacher: string;
+        active_student_count: number;
+      }>;
+      liveClassRows.sort((a, b) => compareClassNames(a.class_name, b.class_name));
+      const liveClassMap = new Map(liveClassRows.map((c) => [c.class_name, c]));
+
+      const liveClassPresets: SdClassPreset[] =
+        liveClassRows.length > 0
+          ? liveClassRows.map((c) => ({
+              className: c.class_name,
+              gradeLevel: c.grade_level,
+              homeroomTeacher: c.homeroom_teacher,
+              companionTeacher: c.companion_teacher,
+              studentCount: c.active_student_count > 0 ? c.active_student_count : 20,
+            }))
+          : [...SD_CLASSES];
+
       const slotsToCreate = buildAutoClassScheduleSlots(
         existingRows.map(toDomainRecord),
-        defaultBook ?? null
+        defaultBook ?? null,
+        liveClassPresets
       );
 
       if (slotsToCreate.length === 0) {
         return NextResponse.json({
           createdCount: 0,
           createdCodes: [],
-          message: 'Seluruh 12 kelas (Kelas 1A–6B) sudah memiliki jadwal baca aktif.',
+          message: `Seluruh ${liveClassPresets.length} rombel kelas sudah memiliki jadwal baca aktif.`,
         });
       }
-
-      const liveClassRows = db
-        .prepare(
-          `SELECT sc.class_name, sc.homeroom_teacher, sc.companion_teacher,
-                  (SELECT COUNT(*) FROM class_students cs WHERE cs.class_name = sc.class_name AND cs.archived_at IS NULL) as active_student_count
-           FROM school_classes sc`
-        )
-        .all() as Array<{
-        class_name: string;
-        homeroom_teacher: string;
-        companion_teacher: string;
-        active_student_count: number;
-      }>;
-      const liveClassMap = new Map(liveClassRows.map((c) => [c.class_name, c]));
 
       const createdCodes = db.transaction(() => {
         const maxIdRow = db
@@ -368,7 +392,9 @@ export async function POST(req: NextRequest) {
     const className = String(body.className || '').trim();
     const gradeLevel = Number(body.gradeLevel) || extractGradeLevel(className);
     const liveClass = db
-      .prepare('SELECT homeroom_teacher, companion_teacher FROM school_classes WHERE class_name = ?')
+      .prepare(
+        'SELECT homeroom_teacher, companion_teacher FROM school_classes WHERE LOWER(class_name) = LOWER(?) AND archived_at IS NULL'
+      )
       .get(className) as { homeroom_teacher: string; companion_teacher: string } | undefined;
     const preset = getClassPreset(className);
 
@@ -383,7 +409,7 @@ export async function POST(req: NextRequest) {
         .prepare('SELECT COUNT(*) as c FROM class_students WHERE class_name = ? AND archived_at IS NULL')
         .get(className) as { c: number }
     ).c;
-    const studentCount = Number(body.studentCount || activeRosterCount || 10);
+    const studentCount = Number(body.studentCount || activeRosterCount || 20);
     const dayOfWeek = String(body.dayOfWeek || '').trim();
     const scheduleDate = body.scheduleDate ? String(body.scheduleDate).trim() : null;
     const startTime = String(body.startTime || '').trim();

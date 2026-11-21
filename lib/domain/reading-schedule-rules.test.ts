@@ -4,21 +4,29 @@ import {
   SD_CLASSES,
   buildAutoClassScheduleSlots,
   buildSeedStudentsForClass,
+  compareClassNames,
   computeClassAttendanceComparison,
   computeClassAttendanceRecap,
   computeClassCoverage,
   computeScheduleSummary,
   detectScheduleConflict,
+  normalizeClassNameInput,
+  normalizeRombelName,
+  parseBulkStudentLines,
+  parseRombelParts,
   parseTimeToMinutes,
+  suggestNextSectionForGrade,
   summarizeSessionAttendance,
   validateAttendanceEntries,
   validateCompletionLog,
+  validateRombelPayload,
   validateSchedulePayload,
   validateStudentPayload,
   validateTimeRange,
   type AttendanceRecordItem,
   type ClassStudentRecord,
   type ReadingScheduleRecord,
+  type SdClassPreset,
 } from './reading-schedule-rules';
 
 test('parseTimeToMinutes and validateTimeRange handle valid and invalid ranges', () => {
@@ -391,5 +399,156 @@ test('computeClassAttendanceComparison aggregates present vs absent totals per c
   assert.equal(emptyComparison.overallAttendanceRate, 0);
   assert.equal(emptyComparison.classesWithSessions, 0);
 });
+
+test('dynamic rombel helpers normalize, validate, suggest, and sort custom classes like Kelas 6D', () => {
+  assert.equal(normalizeRombelName(6, 'd'), 'Kelas 6D');
+  assert.equal(normalizeRombelName(6, 'Unggulan'), 'Kelas 6 Unggulan');
+  assert.equal(normalizeClassNameInput('6d'), 'Kelas 6D');
+  assert.equal(normalizeClassNameInput('  kelas  6 c '), 'Kelas 6C');
+  assert.deepEqual(parseRombelParts('Kelas 6D'), { gradeLevel: 6, section: 'D' });
+  assert.equal(parseRombelParts('Kelas 9Z'), null);
+
+  assert.equal(
+    suggestNextSectionForGrade(6, ['Kelas 6A', 'Kelas 6B']),
+    'C'
+  );
+  assert.equal(
+    suggestNextSectionForGrade(6, ['Kelas 6A', 'Kelas 6B', 'Kelas 6C']),
+    'D'
+  );
+
+  const valid = validateRombelPayload({
+    gradeLevel: 6,
+    section: 'd',
+    homeroomTeacher: 'Ibu Kartika Dewi, S.Pd.',
+    companionTeacher: 'Pak Dimas Prakoso, S.Pd.',
+    roomLabel: 'Gedung B Lt. 2',
+    notes: 'Rombel tambahan tahun ajaran 2026/2027',
+  });
+  assert.equal(valid.ok, true);
+  assert.equal(valid.normalized?.className, 'Kelas 6D');
+  assert.equal(valid.normalized?.gradeLevel, 6);
+  assert.equal(valid.normalized?.section, 'D');
+
+  assert.equal(
+    validateRombelPayload({
+      gradeLevel: 7,
+      section: 'A',
+      homeroomTeacher: 'Ibu Kartika Dewi, S.Pd.',
+      companionTeacher: 'Pak Dimas Prakoso, S.Pd.',
+    }).ok,
+    false
+  );
+  assert.equal(
+    validateRombelPayload({
+      gradeLevel: 6,
+      section: '',
+      homeroomTeacher: 'Ibu Kartika Dewi, S.Pd.',
+      companionTeacher: 'Pak Dimas Prakoso, S.Pd.',
+    }).ok,
+    false
+  );
+
+  const unsorted = ['Kelas 6D', 'Kelas 2B', 'Kelas 6A', 'Kelas 1A', 'Kelas 6C'];
+  assert.deepEqual([...unsorted].sort(compareClassNames), [
+    'Kelas 1A',
+    'Kelas 2B',
+    'Kelas 6A',
+    'Kelas 6C',
+    'Kelas 6D',
+  ]);
+});
+
+test('dynamic rombel Kelas 6D syncs with student validation, coverage, auto-scheduler, and attendance comparison', () => {
+  const kelas6D: SdClassPreset = {
+    className: 'Kelas 6D',
+    gradeLevel: 6,
+    homeroomTeacher: 'Ibu Kartika Dewi, S.Pd.',
+    companionTeacher: 'Pak Dimas Prakoso, S.Pd.',
+    studentCount: 0,
+  };
+  const dynamicClasses: SdClassPreset[] = [...SD_CLASSES, kelas6D];
+
+  // Student validation allows Kelas 6D when present in live class list
+  assert.equal(
+    validateStudentPayload(
+      { className: 'Kelas 6D', fullName: 'Nadia Putri', gender: 'P' },
+      dynamicClasses.map((c) => c.className)
+    ).ok,
+    true
+  );
+  assert.equal(
+    validateStudentPayload(
+      { className: 'Kelas 6E', fullName: 'Nadia Putri', gender: 'P' },
+      dynamicClasses.map((c) => c.className)
+    ).ok,
+    false
+  );
+
+  // Bulk student parser handles multiple formats
+  const parsedBulk = parseBulkStudentLines(
+    'Nadia Putri, P\nRaka Pratama | L\nNIS-6D-03 | Bunga Melati | P\nDanu Wijaya'
+  );
+  assert.equal(parsedBulk.length, 4);
+  assert.deepEqual(parsedBulk[0], { fullName: 'Nadia Putri', gender: 'P' });
+  assert.deepEqual(parsedBulk[2], { studentCode: 'NIS-6D-03', fullName: 'Bunga Melati', gender: 'P' });
+
+  // Auto-generate schedules for all 12 default classes first
+  const baseSlots = buildAutoClassScheduleSlots([], { id: 1, title: 'Buku Bacaan SD' }, SD_CLASSES);
+  const baseRecords: ReadingScheduleRecord[] = baseSlots.map((s, idx) => ({
+    id: idx + 1,
+    ...s,
+    status: 'Terjadwal',
+  }));
+
+  // Now add Kelas 6D to the dynamic class list -> coverage should become 12/13 with Kelas 6D missing
+  const covWith6D = computeClassCoverage(baseRecords, dynamicClasses);
+  assert.equal(covWith6D.totalClasses, 13);
+  assert.equal(covWith6D.coveredCount, 12);
+  assert.deepEqual(covWith6D.missingClasses, ['Kelas 6D']);
+
+  // Auto-generate missing slots should create exactly 1 non-conflicting slot for Kelas 6D
+  const generated6D = buildAutoClassScheduleSlots(
+    baseRecords,
+    { id: 1, title: 'Buku Bacaan SD' },
+    dynamicClasses
+  );
+  assert.equal(generated6D.length, 1);
+  assert.equal(generated6D[0].className, 'Kelas 6D');
+  assert.equal(generated6D[0].homeroomTeacher, 'Ibu Kartika Dewi, S.Pd.');
+  assert.ok(generated6D[0].studentCount >= 1);
+  assert.equal(
+    detectScheduleConflict(
+      {
+        className: generated6D[0].className,
+        dayOfWeek: generated6D[0].dayOfWeek,
+        startTime: generated6D[0].startTime,
+        endTime: generated6D[0].endTime,
+        roomArea: generated6D[0].roomArea,
+      },
+      baseRecords
+    ).hasConflict,
+    false
+  );
+
+  // Attendance comparison includes Kelas 6D in sorted order
+  const comp = computeClassAttendanceComparison(
+    [
+      {
+        class_name: 'Kelas 6D',
+        students_present: 22,
+        student_count: 24,
+        books_read_count: 28,
+      },
+    ],
+    dynamicClasses
+  );
+  assert.equal(comp.classes.length, 13);
+  assert.equal(comp.classes[12].className, 'Kelas 6D');
+  assert.equal(comp.classes[12].shortLabel, '6D');
+  assert.equal(comp.classes[12].presentCount, 22);
+  assert.equal(comp.classes[12].absentCount, 2);
+});
+
 
 

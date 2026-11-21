@@ -385,10 +385,268 @@ export interface ClassCoverageSummary {
   classBreakdown: ClassCoverageEntry[];
 }
 
-export function computeClassCoverage(schedules: ReadingScheduleRecord[]): ClassCoverageSummary {
+export function parseRombelParts(
+  rawClassName: string
+): { gradeLevel: number; section: string } | null {
+  const cleaned = String(rawClassName || '')
+    .trim()
+    .replace(/\s+/g, ' ');
+  if (!cleaned || cleaned.length > 40) return null;
+
+  const withoutPrefix = cleaned.replace(/^Kelas\s+/i, '').trim();
+  const match = withoutPrefix.match(/^([1-6])\s*([A-Za-z0-9][A-Za-z0-9\s\-]{0,14})$/);
+  if (!match) return null;
+
+  const gradeLevel = Number(match[1]);
+  const rawSection = match[2].trim().replace(/\s+/g, ' ');
+  if (!rawSection || gradeLevel < 1 || gradeLevel > 6) return null;
+
+  const section =
+    rawSection.length <= 3 && /^[A-Za-z0-9]+$/.test(rawSection)
+      ? rawSection.toUpperCase()
+      : rawSection;
+
+  return { gradeLevel, section };
+}
+
+export function normalizeRombelName(gradeLevel: number, section: string): string {
+  const grade = Math.trunc(Number(gradeLevel));
+  const cleanSection = String(section || '')
+    .trim()
+    .replace(/\s+/g, ' ');
+  if (!cleanSection) return `Kelas ${grade}`;
+
+  if (cleanSection.length <= 3 && /^[A-Za-z0-9]+$/.test(cleanSection)) {
+    return `Kelas ${grade}${cleanSection.toUpperCase()}`;
+  }
+  return `Kelas ${grade} ${cleanSection}`;
+}
+
+export function normalizeClassNameInput(raw: string): string {
+  const parsed = parseRombelParts(raw);
+  if (!parsed) {
+    return String(raw || '')
+      .trim()
+      .replace(/\s+/g, ' ');
+  }
+  return normalizeRombelName(parsed.gradeLevel, parsed.section);
+}
+
+export function isValidSdClassNameFormat(className: string): boolean {
+  const trimmed = String(className || '').trim();
+  if (!/^Kelas\s+/i.test(trimmed)) return false;
+  return parseRombelParts(trimmed) !== null;
+}
+
+export function compareClassNames(a: string, b: string): number {
+  const gradeA = extractGradeLevel(a);
+  const gradeB = extractGradeLevel(b);
+  if (gradeA !== gradeB) return gradeA - gradeB;
+  const secA = String(a || '')
+    .replace(/^Kelas\s+/i, '')
+    .trim();
+  const secB = String(b || '')
+    .replace(/^Kelas\s+/i, '')
+    .trim();
+  return secA.localeCompare(secB, 'id', { numeric: true, sensitivity: 'base' });
+}
+
+export function suggestNextSectionForGrade(
+  gradeLevel: number,
+  existingClassNames: ReadonlyArray<string>
+): string {
+  const usedSections = new Set<string>();
+  for (const name of existingClassNames) {
+    const parts = parseRombelParts(name);
+    if (parts && parts.gradeLevel === gradeLevel) {
+      usedSections.add(parts.section.toUpperCase());
+    }
+  }
+  const letters = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ';
+  for (let i = 0; i < letters.length; i++) {
+    const letter = letters[i];
+    if (!usedSections.has(letter)) return letter;
+  }
+  return `R${usedSections.size + 1}`;
+}
+
+export interface ValidatedRombelPayload {
+  className: string;
+  gradeLevel: number;
+  section: string;
+  homeroomTeacher: string;
+  companionTeacher: string;
+  roomLabel: string;
+  notes: string;
+}
+
+export function validateRombelPayload(input: {
+  gradeLevel?: number | string;
+  section?: string;
+  className?: string;
+  homeroomTeacher: string;
+  companionTeacher: string;
+  roomLabel?: string;
+  notes?: string;
+}): { ok: boolean; reason?: string; normalized?: ValidatedRombelPayload } {
+  let gradeLevel = Number(input.gradeLevel);
+  let section = String(input.section || '')
+    .trim()
+    .replace(/\s+/g, ' ');
+
+  if ((!gradeLevel || !section) && input.className) {
+    const parsed = parseRombelParts(input.className);
+    if (parsed) {
+      gradeLevel = parsed.gradeLevel;
+      section = parsed.section;
+    }
+  }
+
+  if (!Number.isInteger(gradeLevel) || gradeLevel < 1 || gradeLevel > 6) {
+    return { ok: false, reason: 'Tingkat kelas SD harus dipilih antara Kelas 1 hingga Kelas 6.' };
+  }
+
+  if (!section || !/^[A-Za-z0-9][A-Za-z0-9\s\-]{0,14}$/.test(section)) {
+    return {
+      ok: false,
+      reason:
+        'Huruf/nama rombel wajib diisi (contoh: C, D, E, atau Unggulan; maks. 15 karakter huruf/angka).',
+    };
+  }
+
+  const className = normalizeRombelName(gradeLevel, section);
+  if (className.length > 40) {
+    return { ok: false, reason: 'Nama rombel kelas maksimal 40 karakter.' };
+  }
+
+  const homeroomTeacher = String(input.homeroomTeacher || '').trim();
+  if (homeroomTeacher.length < 3 || homeroomTeacher.length > 120) {
+    return { ok: false, reason: 'Nama wali kelas harus antara 3 hingga 120 karakter.' };
+  }
+
+  const companionTeacher = String(input.companionTeacher || '').trim();
+  if (companionTeacher.length < 3 || companionTeacher.length > 120) {
+    return { ok: false, reason: 'Nama guru pendamping harus antara 3 hingga 120 karakter.' };
+  }
+
+  const roomLabel = String(input.roomLabel || '').trim();
+  if (roomLabel.length > 60) {
+    return { ok: false, reason: 'Nama ruang kelas maksimal 60 karakter.' };
+  }
+
+  const notes = String(input.notes || '').trim();
+  if (notes.length > 240) {
+    return { ok: false, reason: 'Catatan rombel maksimal 240 karakter.' };
+  }
+
+  return {
+    ok: true,
+    normalized: {
+      className,
+      gradeLevel,
+      section:
+        section.length <= 3 && /^[A-Za-z0-9]+$/.test(section) ? section.toUpperCase() : section,
+      homeroomTeacher,
+      companionTeacher,
+      roomLabel,
+      notes,
+    },
+  };
+}
+
+export function parseBulkStudentLines(
+  rawText: string,
+  defaultGender: 'L' | 'P' = 'L'
+): Array<{ fullName: string; gender: 'L' | 'P'; studentCode?: string }> {
+  const lines = String(rawText || '')
+    .split(/\r?\n/)
+    .map((l) => l.trim())
+    .filter(Boolean);
+
+  const result: Array<{ fullName: string; gender: 'L' | 'P'; studentCode?: string }> = [];
+  for (const line of lines) {
+    const parts = line
+      .split(/[|,;\t]+/)
+      .map((p) => p.trim())
+      .filter(Boolean);
+
+    if (parts.length === 0) continue;
+
+    if (parts.length === 1) {
+      const fullName = parts[0];
+      if (fullName.length >= 2) {
+        result.push({ fullName: fullName.slice(0, 100), gender: defaultGender });
+      }
+      continue;
+    }
+
+    if (parts.length === 2) {
+      const secondUpper = parts[1].toUpperCase();
+      if (secondUpper === 'L' || secondUpper === 'P' || secondUpper === 'LAKI-LAKI' || secondUpper === 'PEREMPUAN') {
+        const gender: 'L' | 'P' = secondUpper.startsWith('P') ? 'P' : 'L';
+        if (parts[0].length >= 2) {
+          result.push({ fullName: parts[0].slice(0, 100), gender });
+        }
+      } else if (parts[1].length >= 2) {
+        result.push({
+          studentCode: parts[0].slice(0, 32),
+          fullName: parts[1].slice(0, 100),
+          gender: defaultGender,
+        });
+      }
+      continue;
+    }
+
+    // 3+ parts: code | name | gender
+    const thirdUpper = parts[2].toUpperCase();
+    const gender: 'L' | 'P' = thirdUpper.startsWith('P')
+      ? 'P'
+      : thirdUpper.startsWith('L')
+        ? 'L'
+        : defaultGender;
+    if (parts[1].length >= 2) {
+      result.push({
+        studentCode: parts[0].slice(0, 32),
+        fullName: parts[1].slice(0, 100),
+        gender,
+      });
+    }
+  }
+  return result;
+}
+
+export function computeClassCoverage(
+  schedules: ReadingScheduleRecord[],
+  classList: ReadonlyArray<SdClassPreset> = SD_CLASSES
+): ClassCoverageSummary {
   const active = schedules.filter((s) => !s.archived && s.status !== 'Dibatalkan');
 
-  const classBreakdown: ClassCoverageEntry[] = SD_CLASSES.map((preset) => {
+  const presetMap = new Map<string, SdClassPreset>();
+  for (const preset of classList) {
+    const key = preset.className.trim().toLowerCase();
+    if (!presetMap.has(key)) {
+      presetMap.set(key, preset);
+    }
+  }
+
+  for (const item of active) {
+    const key = item.className.trim().toLowerCase();
+    if (key && !presetMap.has(key)) {
+      presetMap.set(key, {
+        className: item.className.trim(),
+        gradeLevel: item.gradeLevel || extractGradeLevel(item.className),
+        homeroomTeacher: item.homeroomTeacher || '',
+        companionTeacher: item.companionTeacher || '',
+        studentCount: item.studentCount || 10,
+      });
+    }
+  }
+
+  const orderedPresets = Array.from(presetMap.values()).sort((a, b) =>
+    compareClassNames(a.className, b.className)
+  );
+
+  const classBreakdown: ClassCoverageEntry[] = orderedPresets.map((preset) => {
     const classItems = active.filter(
       (s) => s.className.trim().toLowerCase() === preset.className.toLowerCase()
     );
@@ -419,8 +677,8 @@ export function computeClassCoverage(schedules: ReadingScheduleRecord[]): ClassC
 
   const coveredCount = classBreakdown.filter((c) => c.hasSchedule).length;
   const missingClasses = classBreakdown.filter((c) => !c.hasSchedule).map((c) => c.className);
-  const totalClasses = SD_CLASSES.length;
-  const coveragePercent = Math.round((coveredCount / totalClasses) * 100);
+  const totalClasses = classBreakdown.length;
+  const coveragePercent = totalClasses > 0 ? Math.round((coveredCount / totalClasses) * 100) : 100;
 
   return {
     totalClasses,
@@ -482,15 +740,24 @@ export interface GeneratedClassSlot {
 
 export function buildAutoClassScheduleSlots(
   existingSchedules: ReadingScheduleRecord[],
-  defaultBook?: { id: number | string; title: string } | null
+  defaultBook?: { id: number | string; title: string } | null,
+  classList: ReadonlyArray<SdClassPreset> = SD_CLASSES
 ): GeneratedClassSlot[] {
   const working: ReadingScheduleRecord[] = [...existingSchedules];
-  const coverage = computeClassCoverage(working);
+  const coverage = computeClassCoverage(working, classList);
   const created: GeneratedClassSlot[] = [];
 
   for (let i = 0; i < coverage.missingClasses.length; i++) {
     const className = coverage.missingClasses[i];
-    const preset = SD_CLASSES.find((c) => c.className === className)!;
+    const preset =
+      classList.find((c) => c.className.toLowerCase() === className.toLowerCase()) ||
+      getClassPreset(className) || {
+        className,
+        gradeLevel: extractGradeLevel(className),
+        homeroomTeacher: 'Wali Kelas',
+        companionTeacher: 'Guru Pendamping',
+        studentCount: 20,
+      };
     const mode =
       preset.gradeLevel <= 2
         ? 'Membaca Bersama'
@@ -520,7 +787,7 @@ export function buildAutoClassScheduleSlots(
               gradeLevel: preset.gradeLevel,
               homeroomTeacher: preset.homeroomTeacher,
               companionTeacher: preset.companionTeacher,
-              studentCount: preset.studentCount,
+              studentCount: Math.max(1, Number(preset.studentCount || 20)),
               dayOfWeek: day,
               startTime,
               endTime,
@@ -553,15 +820,31 @@ export function getClassPreset(className: string): SdClassPreset | undefined {
   return SD_CLASSES.find((c) => c.className.toLowerCase() === String(className || '').trim().toLowerCase());
 }
 
-export function validateStudentPayload(input: {
-  className: string;
-  fullName: string;
-  studentCode?: string;
-  gender: string;
-}): { ok: boolean; reason?: string } {
+export function validateStudentPayload(
+  input: {
+    className: string;
+    fullName: string;
+    studentCode?: string;
+    gender: string;
+  },
+  allowedClassNames?: ReadonlyArray<string>
+): { ok: boolean; reason?: string } {
   const cls = String(input.className || '').trim();
-  if (!SD_CLASSES.some((c) => c.className === cls)) {
-    return { ok: false, reason: 'Kelas SD harus dipilih dari Kelas 1A hingga Kelas 6B.' };
+  if (!isValidSdClassNameFormat(cls)) {
+    return {
+      ok: false,
+      reason: 'Format nama rombel kelas SD tidak valid (contoh: Kelas 1A, Kelas 6D).',
+    };
+  }
+  if (
+    allowedClassNames &&
+    allowedClassNames.length > 0 &&
+    !allowedClassNames.some((c) => c.trim().toLowerCase() === cls.toLowerCase())
+  ) {
+    return {
+      ok: false,
+      reason: `Rombel "${cls}" belum terdaftar atau sudah diarsipkan.`,
+    };
   }
   const name = String(input.fullName || '').trim();
   if (name.length < 2 || name.length > 100) {
@@ -821,25 +1104,27 @@ export function computeClassAttendanceComparison(
   let totalSessions = 0;
   let classesWithSessions = 0;
 
-  const classes = Array.from(orderedMap.values()).map((entry) => {
-    const totalTracked = entry.presentCount + entry.absentCount;
-    const attendanceRate =
-      totalTracked > 0 ? Math.round((entry.presentCount / totalTracked) * 100) : 0;
+  const classes = Array.from(orderedMap.values())
+    .sort((a, b) => compareClassNames(a.className, b.className))
+    .map((entry) => {
+      const totalTracked = entry.presentCount + entry.absentCount;
+      const attendanceRate =
+        totalTracked > 0 ? Math.round((entry.presentCount / totalTracked) * 100) : 0;
 
-    totalPresent += entry.presentCount;
-    totalAbsent += entry.absentCount;
-    totalIzin += entry.izinCount;
-    totalSakit += entry.sakitCount;
-    totalAlpa += entry.alpaCount;
-    totalSessions += entry.sessionsCount;
-    if (entry.hasRecordedSession) classesWithSessions += 1;
+      totalPresent += entry.presentCount;
+      totalAbsent += entry.absentCount;
+      totalIzin += entry.izinCount;
+      totalSakit += entry.sakitCount;
+      totalAlpa += entry.alpaCount;
+      totalSessions += entry.sessionsCount;
+      if (entry.hasRecordedSession) classesWithSessions += 1;
 
-    return {
-      ...entry,
-      totalTracked,
-      attendanceRate,
-    };
-  });
+      return {
+        ...entry,
+        totalTracked,
+        attendanceRate,
+      };
+    });
 
   const grandTotal = totalPresent + totalAbsent;
   const overallAttendanceRate =

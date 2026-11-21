@@ -283,7 +283,11 @@ export function ClassAttendanceBarChart({
           <div
             className={cn(
               'h-[280px] sm:h-[310px] w-full min-w-0',
-              chartData.length > 6 && 'min-w-[520px] sm:min-w-0'
+              chartData.length > 14
+                ? 'min-w-[820px]'
+                : chartData.length > 12
+                  ? 'min-w-[660px] lg:min-w-0'
+                  : chartData.length > 6 && 'min-w-[520px] sm:min-w-0'
             )}
           >
             <ResponsiveContainer width="100%" height="100%" minWidth={0}>

@@ -54,11 +54,17 @@ export interface ScheduleLogRow {
 }
 
 export interface SchoolClassInfo {
+  id?: number | string;
   className: string;
   gradeLevel: number;
   homeroomTeacher: string;
   companionTeacher: string;
+  roomLabel?: string;
+  notes?: string;
+  archived?: boolean;
   activeStudentCount: number;
+  scheduleCount?: number;
+  memberCount?: number;
 }
 
 export interface ClassStudentRow {
@@ -77,5 +83,9 @@ export interface BookOption {
   title: string;
 }
 
-export type LiveClassPreset = SdClassPreset;
+export interface LiveClassPreset extends SdClassPreset {
+  activeStudentCount?: number;
+  roomLabel?: string;
+}
+
 export type StudentRecapRow = StudentCumulativeRecap;

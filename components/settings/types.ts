@@ -1,4 +1,9 @@
-import type { BackupHealthSummary, BackupModuleId, ModuleDiffRow } from '@/lib/domain/settings-backup-rules';
+import type {
+  BackupHealthSummary,
+  BackupModuleId,
+  ModuleDiffRow,
+  PurgeEligibilitySummary,
+} from '@/lib/domain/settings-backup-rules';
 
 export interface MembershipTypeRow {
   id: number;
@@ -47,6 +52,7 @@ export interface UserRow {
   role_id: number;
   role_name: string;
   role_slug: string;
+  assigned_class?: string;
   approval_status?: 'approved' | 'pending' | 'rejected';
   requested_role_id?: number | null;
   requested_role_name?: string | null;
@@ -54,6 +60,45 @@ export interface UserRow {
   approval_note?: string;
   approved_at?: string | null;
   created_at?: string;
+}
+
+export interface SchoolClassSummaryRow {
+  id: number;
+  docId?: string;
+  className: string;
+  gradeLevel: number;
+  homeroomTeacher: string;
+  companionTeacher: string;
+}
+
+export interface RegistrationRequestRow {
+  id: number;
+  docId?: string;
+  requesterUid?: string;
+  requestCode: string;
+  username: string;
+  email: string;
+  fullName: string;
+  requestedRoleId: number;
+  requestedRoleSlug: string;
+  requestedRoleName: string;
+  assignedClass: string;
+  teacherSlot: 'homeroom' | 'companion' | '';
+  unitOrClass: string;
+  identityNumber: string;
+  gender: string;
+  phone: string;
+  extraMeta: Record<string, string>;
+  hasConflict: boolean;
+  conflictType: string;
+  conflictExistingValue: string;
+  conflictSummary: string;
+  status: 'pending' | 'approved' | 'rejected';
+  decisionNote: string;
+  resolution: Record<string, unknown>;
+  reviewedByName: string;
+  reviewedAt: string | null;
+  createdAt: string;
 }
 
 export interface StaffRoleRow {
@@ -84,6 +129,8 @@ export interface SettingsPayload {
   permissions: PermissionRow[];
   rolePermissions: RolePermissionRow[];
   users: UserRow[];
+  registrationRequests?: RegistrationRequestRow[];
+  schoolClasses?: SchoolClassSummaryRow[];
   staffRoles?: StaffRoleRow[];
   auditLogs: AuditLogRow[];
   backupSummary?: {
@@ -133,6 +180,7 @@ export interface BackupMetaPayload {
     backup_include_audit_logs: string;
   };
   health: BackupHealthSummary;
+  purgeEligibility?: PurgeEligibilitySummary;
 }
 
 export interface RestoreVerifyResult {

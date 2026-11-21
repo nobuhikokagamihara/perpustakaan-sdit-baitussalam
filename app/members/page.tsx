@@ -66,9 +66,11 @@ export default function MembersPage() {
   const canBlockMembers = can('members.block');
   const [members, setMembers] = useState<MemberRow[]>([]);
   const [types, setTypes] = useState<Array<{ id: number; name: string }>>([]);
+  const [schoolClasses, setSchoolClasses] = useState<Array<{ className: string; gradeLevel: number }>>([]);
   const [q, setQ] = useState('');
   const [statusFilter, setStatusFilter] = useState('');
   const [typeFilter, setTypeFilter] = useState('');
+  const [classFilter, setClassFilter] = useState('');
   const [archivedFilter, setArchivedFilter] = useState<'exclude' | 'only'>('exclude');
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -126,18 +128,22 @@ export default function MembersPage() {
       if (q) sp.set('q', q);
       if (statusFilter) sp.set('status', statusFilter);
       if (typeFilter) sp.set('typeId', typeFilter);
+      if (classFilter) sp.set('className', classFilter);
       if (archivedFilter === 'only') sp.set('archived', 'only');
       const res = await gatewayFetch(`/api/members?${sp.toString()}`, { cache: 'no-store' });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || 'Gagal memuat anggota.');
       setMembers(data.members || []);
       setTypes(data.membershipTypes || []);
+      if (Array.isArray(data.schoolClasses)) {
+        setSchoolClasses(data.schoolClasses);
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Gagal memuat anggota.');
     } finally {
       setLoading(false);
     }
-  }, [q, statusFilter, typeFilter, archivedFilter]);
+  }, [q, statusFilter, typeFilter, classFilter, archivedFilter]);
 
   useEffect(() => {
     if (authLoading || !user || !canReadMembers) return;
@@ -146,6 +152,7 @@ export default function MembersPage() {
     if (q) sp.set('q', q);
     if (statusFilter) sp.set('status', statusFilter);
     if (typeFilter) sp.set('typeId', typeFilter);
+    if (classFilter) sp.set('className', classFilter);
     if (archivedFilter === 'only') sp.set('archived', 'only');
     gatewayFetch(`/api/members?${sp.toString()}`, { cache: 'no-store' })
       .then(async (res) => {
@@ -154,6 +161,9 @@ export default function MembersPage() {
         if (active) {
           setMembers(data.members || []);
           setTypes(data.membershipTypes || []);
+          if (Array.isArray(data.schoolClasses)) {
+            setSchoolClasses(data.schoolClasses);
+          }
           setError(null);
         }
       })
@@ -166,7 +176,7 @@ export default function MembersPage() {
     return () => {
       active = false;
     };
-  }, [authLoading, user, canReadMembers, q, statusFilter, typeFilter, archivedFilter]);
+  }, [authLoading, user, canReadMembers, q, statusFilter, typeFilter, classFilter, archivedFilter]);
 
   function openCreate() {
     setEditing(null);
@@ -404,6 +414,19 @@ export default function MembersPage() {
             ))}
           </select>
           <select
+            aria-label="Filter rombel atau kelas anggota"
+            value={classFilter}
+            onChange={(e) => setClassFilter(e.target.value)}
+            className="h-10 rounded-lg border border-[#E7E4DC] bg-[#FAF9F5] px-3 text-sm"
+          >
+            <option value="">Semua Rombel / Kelas</option>
+            {schoolClasses.map((c) => (
+              <option key={c.className} value={c.className}>
+                {c.className}
+              </option>
+            ))}
+          </select>
+          <select
             aria-label="Filter arsip anggota"
             value={archivedFilter}
             onChange={(e) => setArchivedFilter(e.target.value as 'exclude' | 'only')}
@@ -627,12 +650,45 @@ export default function MembersPage() {
               value={identityNumber}
               onChange={(e) => setIdentityNumber(e.target.value)}
             />
-            <TextField
-              label="Kelas / Jabatan"
-              value={unitOrClass}
-              onChange={(e) => setUnitOrClass(e.target.value)}
-              placeholder="Contoh: Kelas 4A atau Guru IPA"
-            />
+            <div className="space-y-1.5">
+              <TextField
+                label="Kelas / Jabatan"
+                value={unitOrClass}
+                onChange={(e) => setUnitOrClass(e.target.value)}
+                list="member-rombel-options"
+                placeholder="Pilih rombel atau ketik jabatan (misal: Kelas 6D)"
+              />
+              <datalist id="member-rombel-options">
+                {schoolClasses.map((c) => (
+                  <option key={c.className} value={c.className} />
+                ))}
+              </datalist>
+              {schoolClasses.length > 0 && (
+                <select
+                  aria-label="Pilih cepat rombel kelas SD"
+                  value={
+                    schoolClasses.some(
+                      (c) => c.className.toLowerCase() === unitOrClass.trim().toLowerCase()
+                    )
+                      ? schoolClasses.find(
+                          (c) => c.className.toLowerCase() === unitOrClass.trim().toLowerCase()
+                        )?.className || ''
+                      : ''
+                  }
+                  onChange={(e) => {
+                    if (e.target.value) setUnitOrClass(e.target.value);
+                  }}
+                  className="h-8 w-full rounded-lg border border-[#E7E4DC] bg-[#F4F3EE] px-2.5 text-xs text-[#4A4945] focus:border-[#222B3A] focus:outline-none"
+                >
+                  <option value="">Pilih cepat rombel terdaftar ({schoolClasses.length} rombel)...</option>
+                  {schoolClasses.map((c) => (
+                    <option key={c.className} value={c.className}>
+                      {c.className}
+                    </option>
+                  ))}
+                </select>
+              )}
+            </div>
           </div>
           <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
             <TextField

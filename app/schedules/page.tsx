@@ -22,6 +22,7 @@ import { AppShell } from '@/components/layout/AppShell';
 import { AttendanceRecapPanel } from '@/components/schedules/AttendanceRecapPanel';
 import { ClassAttendanceBarChart } from '@/components/schedules/ClassAttendanceBarChart';
 import { ClassRosterPanel } from '@/components/schedules/ClassRosterPanel';
+import { RombelFormModal, type RombelCreatedResult } from '@/components/schedules/RombelFormModal';
 import { SessionAttendanceModal } from '@/components/schedules/SessionAttendanceModal';
 import type {
   BookOption,
@@ -156,6 +157,9 @@ export default function ReadingSchedulesPage() {
   const [formNotes, setFormNotes] = useState('');
   const [formError, setFormError] = useState<string | null>(null);
   const [savingForm, setSavingForm] = useState(false);
+
+  // Add Rombel Modal
+  const [rombelModalOpen, setRombelModalOpen] = useState(false);
 
   // Session Attendance Modal
   const [attendanceTarget, setAttendanceTarget] = useState<ScheduleRow | null>(null);
@@ -443,14 +447,22 @@ export default function ReadingSchedulesPage() {
   }, [dayFilter]);
 
   const totalEnrolledStudents = useMemo(
-    () => liveClasses.reduce((sum, c) => sum + Number(c.studentCount || 0), 0),
+    () =>
+      liveClasses.reduce(
+        (sum, c) => sum + Number(c.activeStudentCount ?? c.studentCount ?? 0),
+        0
+      ),
     [liveClasses]
   );
+
+  async function handleRombelCreated(_result: RombelCreatedResult) {
+    await loadData();
+  }
 
   return (
     <AppShell
       title="Penjadwalan Baca Buku Setiap Kelas"
-      description="Kelola jadwal kunjungan literasi seluruh 12 kelas SD (1A–6B), wali kelas & guru pendamping, data siswa tiap kelas, serta absensi dan rekap hadir/tidak hadir per sesi."
+      description={`Kelola jadwal kunjungan literasi seluruh ${coverage.totalClasses} rombel kelas SD, wali kelas & guru pendamping, data siswa tiap kelas, serta absensi dan rekap hadir/tidak hadir per sesi.`}
       requiredPermission="schedules.read"
       actions={
         <div className="flex flex-wrap items-center gap-2">
@@ -492,6 +504,12 @@ export default function ReadingSchedulesPage() {
             <Printer className="h-3.5 w-3.5" />
             Cetak
           </Button>
+          {canWrite && (
+            <Button variant="secondary" size="sm" onClick={() => setRombelModalOpen(true)}>
+              <Plus className="h-3.5 w-3.5" />
+              Tambah Rombel
+            </Button>
+          )}
           {canWrite && coverage.missingClasses.length > 0 && (
             <Button variant="secondary" size="sm" loading={generating} onClick={handleAutoGenerate}>
               <Sparkles className="h-3.5 w-3.5 text-[#E56B63]" />
@@ -511,12 +529,12 @@ export default function ReadingSchedulesPage() {
         {/* KPI Row */}
         <div className="grid grid-cols-2 gap-4 lg:grid-cols-4">
           <StatCard
-            label="Cakupan Kelas SD (1A–6B)"
+            label="Cakupan Rombel Kelas SD"
             value={`${coverage.coveredCount}/${coverage.totalClasses}`}
             hint={
               coverage.coveredCount === coverage.totalClasses
                 ? `100% terjadwal · ${totalEnrolledStudents} siswa terdaftar`
-                : `${coverage.missingClasses.length} kelas belum punya slot`
+                : `${coverage.missingClasses.length} rombel belum punya slot`
             }
             tone={coverage.coveredCount === coverage.totalClasses ? 'success' : 'warning'}
           />
@@ -576,27 +594,35 @@ export default function ReadingSchedulesPage() {
         {/* SCHEDULE TABS: WEEKLY OR TABLE */}
         {(viewMode === 'weekly' || viewMode === 'table') && (
           <>
-            {/* 12-Class Coverage Matrix */}
+            {/* Dynamic Rombel Coverage Matrix */}
             <section className="rounded-xl border border-[#E7E4DC] bg-[#FAF9F5] p-4 space-y-3">
               <div className="flex flex-wrap items-center justify-between gap-2">
                 <div>
                   <h2 className="font-serif text-base font-semibold text-[#1E2433]">
-                    Matriks Kelengkapan Jadwal 12 Kelas SD
+                    Matriks Kelengkapan Jadwal ({coverage.totalClasses} Rombel Kelas SD)
                   </h2>
                   <p className="text-xs text-[#5C5E64]">
-                    Pilih kelas untuk memfilter jadwal mingguan atau klik tab Data Kelas &amp; Siswa untuk mengelola daftar siswa dan guru pendamping.
+                    Pilih rombel untuk memfilter jadwal mingguan atau tambah rombel baru (misal: Kelas 6D) untuk langsung tersinkronisasi.
                   </p>
                 </div>
-                {classFilter && (
-                  <Button variant="ghost" size="sm" onClick={() => setClassFilter('')}>
-                    Tampilkan Semua Kelas
-                  </Button>
-                )}
+                <div className="flex flex-wrap items-center gap-2">
+                  {classFilter && (
+                    <Button variant="ghost" size="sm" onClick={() => setClassFilter('')}>
+                      Tampilkan Semua Kelas
+                    </Button>
+                  )}
+                  {canWrite && (
+                    <Button variant="secondary" size="sm" onClick={() => setRombelModalOpen(true)}>
+                      <Plus className="h-3.5 w-3.5" />
+                      Tambah Rombel
+                    </Button>
+                  )}
+                </div>
               </div>
 
-              <div className="grid grid-cols-3 gap-2 sm:grid-cols-4 md:grid-cols-6 lg:grid-cols-12">
+              <div className="grid grid-cols-3 gap-2 sm:grid-cols-4 md:grid-cols-6 xl:grid-cols-8">
                 {coverage.classBreakdown.map((item) => {
-                  const shortLabel = item.className.replace('Kelas ', '');
+                  const shortLabel = item.className.replace(/^Kelas\s+/i, '');
                   const isSelected = classFilter === item.className;
                   return (
                     <button
@@ -1057,7 +1083,7 @@ export default function ReadingSchedulesPage() {
         {/* TAB 3: DATA KELAS, WALI, PENDAMPING & SISWA */}
         {viewMode === 'rosters' && (
           <ClassRosterPanel
-            initialClassName={classFilter || SD_CLASSES[0].className}
+            initialClassName={classFilter || liveClasses[0]?.className || SD_CLASSES[0].className}
             canWrite={canWrite}
             onDataChanged={loadData}
           />
@@ -1068,6 +1094,7 @@ export default function ReadingSchedulesPage() {
           <AttendanceRecapPanel
             key={recapClassTarget || 'all'}
             logs={logs}
+            classes={liveClasses}
             initialClassFilter={recapClassTarget}
           />
         )}
@@ -1223,6 +1250,14 @@ export default function ReadingSchedulesPage() {
           onSaved={loadData}
         />
       )}
+
+      {/* ADD ROMBEL MODAL */}
+      <RombelFormModal
+        open={rombelModalOpen}
+        onClose={() => setRombelModalOpen(false)}
+        existingClassNames={liveClasses.map((c) => c.className)}
+        onCreated={handleRombelCreated}
+      />
 
       {/* ARCHIVE CONFIRM */}
       <ConfirmDialog

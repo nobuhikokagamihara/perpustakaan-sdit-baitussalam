@@ -347,3 +347,165 @@ test('SCHOOL_ROLE_CATALOG covers whole school community and enforces approval ru
   assert.equal(validSignup.cleanUsername, 'siti.aminah');
 });
 
+test('purge all data enforces strict backup-first prerequisite, recency window, super_admin RBAC, and exact confirmation phrase', async () => {
+  const {
+    PURGE_CONFIRMATION_PHRASE,
+    PURGEABLE_SQLITE_TABLES,
+    evaluatePurgeBackupPrerequisite,
+    parseUtcTimestampMs,
+    validatePurgeAllDataRequest,
+  } = await import('./settings-backup-rules');
+
+  const validChecksum = sha256Hex('full-backup-payload');
+  const nowIso = '2026-11-20T10:30:00.000Z';
+
+  // Ensure SQLite UTC format parses cleanly
+  assert.equal(
+    parseUtcTimestampMs('2026-11-20 10:20:00'),
+    Date.parse('2026-11-20T10:20:00Z')
+  );
+
+  // Critical preserved tables MUST NOT be in PURGEABLE_SQLITE_TABLES
+  for (const protectedTbl of [
+    'roles',
+    'permissions',
+    'role_permissions',
+    'membership_types',
+    'library_settings',
+    'backup_snapshots',
+    'audit_logs',
+    'users',
+  ]) {
+    assert.ok(
+      !PURGEABLE_SQLITE_TABLES.includes(protectedTbl),
+      `Protected table ${protectedTbl} must not be blindly wiped`
+    );
+  }
+
+  // 1. No snapshot -> blocked
+  const noSnap = evaluatePurgeBackupPrerequisite([], 420, nowIso, 30);
+  assert.equal(noSnap.hasEligibleBackup, false);
+  assert.equal(noSnap.operationalRecordCount, 420);
+  assert.match(noSnap.reason, /backup penuh/i);
+
+  // 2. Partial snapshot only -> blocked
+  const partialOnly = evaluatePurgeBackupPrerequisite(
+    [
+      {
+        id: 1,
+        snapshot_code: 'SNP-PARTIAL',
+        label: 'Hanya Katalog',
+        mode: 'partial',
+        checksum: validChecksum,
+        total_records: 50,
+        created_at: '2026-11-20 10:25:00',
+      },
+    ],
+    420,
+    nowIso,
+    30
+  );
+  assert.equal(partialOnly.hasEligibleBackup, false);
+  assert.match(partialOnly.reason, /parsial|PENUH/i);
+
+  // 3. Expired full snapshot (45 minutes old > 30 minutes) -> blocked
+  const expiredFull = evaluatePurgeBackupPrerequisite(
+    [
+      {
+        id: 2,
+        snapshot_code: 'SNP-OLD',
+        label: 'Backup Lama',
+        mode: 'full',
+        checksum: validChecksum,
+        total_records: 420,
+        created_at: '2026-11-20 09:45:00',
+      },
+    ],
+    420,
+    nowIso,
+    30
+  );
+  assert.equal(expiredFull.hasEligibleBackup, false);
+  assert.match(expiredFull.reason, /45 menit/i);
+
+  // 4. Invalid checksum -> blocked
+  const badChecksum = evaluatePurgeBackupPrerequisite(
+    [
+      {
+        id: 3,
+        snapshot_code: 'SNP-BAD',
+        label: 'Checksum Rusak',
+        mode: 'full',
+        checksum: 'not-a-sha256',
+        total_records: 420,
+        created_at: '2026-11-20 10:25:00',
+      },
+    ],
+    420,
+    nowIso,
+    30
+  );
+  assert.equal(badChecksum.hasEligibleBackup, false);
+  assert.match(badChecksum.reason, /SHA-256/i);
+
+  // 5. Fresh valid full snapshot (10 minutes old) -> eligible!
+  const freshSnap = {
+    id: 4,
+    snapshot_code: 'SNP-FRESH-01',
+    label: 'Backup Penuh Pra-Hapus',
+    mode: 'full',
+    checksum: validChecksum,
+    total_records: 420,
+    created_at: '2026-11-20 10:20:00',
+  };
+  const eligible = evaluatePurgeBackupPrerequisite([freshSnap], 420, nowIso, 30);
+  assert.equal(eligible.hasEligibleBackup, true);
+  assert.equal(eligible.eligibleSnapshot?.snapshot_code, 'SNP-FRESH-01');
+  assert.equal(eligible.eligibleSnapshot?.ageMinutes, 10);
+  assert.equal(eligible.eligibleSnapshot?.expiresInMinutes, 20);
+
+  // 6. Non-super_admin rejected even with valid backup & phrase
+  const nonAdmin = validatePurgeAllDataRequest({
+    actorRoleSlug: 'kepala_perpustakaan',
+    confirmationPhrase: PURGE_CONFIRMATION_PHRASE,
+    acknowledgeIrreversible: true,
+    prerequisiteSnapshot: freshSnap,
+    nowIso,
+  });
+  assert.equal(nonAdmin.ok, false);
+  assert.match(nonAdmin.reason || '', /Super Admin/i);
+
+  // 7. Missing checkbox acknowledgment rejected
+  const noAck = validatePurgeAllDataRequest({
+    actorRoleSlug: 'super_admin',
+    confirmationPhrase: PURGE_CONFIRMATION_PHRASE,
+    acknowledgeIrreversible: false,
+    prerequisiteSnapshot: freshSnap,
+    nowIso,
+  });
+  assert.equal(noAck.ok, false);
+
+  // 8. Wrong confirmation phrase rejected (including lowercase)
+  const wrongPhrase = validatePurgeAllDataRequest({
+    actorRoleSlug: 'super_admin',
+    confirmationPhrase: 'hapus semua data',
+    acknowledgeIrreversible: true,
+    prerequisiteSnapshot: freshSnap,
+    nowIso,
+  });
+  assert.equal(wrongPhrase.ok, false);
+  assert.match(wrongPhrase.reason || '', /HAPUS SEMUA DATA/);
+
+  // 9. All conditions satisfied -> accepted
+  const validPurge = validatePurgeAllDataRequest({
+    actorRoleSlug: 'super_admin',
+    confirmationPhrase: '  HAPUS SEMUA DATA  ',
+    acknowledgeIrreversible: true,
+    prerequisiteSnapshot: freshSnap,
+    nowIso,
+  });
+  assert.equal(validPurge.ok, true);
+  assert.equal(validPurge.ageMinutes, 10);
+});
+
+

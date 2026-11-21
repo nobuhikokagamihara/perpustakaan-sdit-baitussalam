@@ -57,6 +57,14 @@ service cloud.firestore {
       );
     }
 
+    function isAccountApprover() {
+      return isAdmin() || (
+        hasStaffDoc()
+        && staffRole().isActive == true
+        && staffRole().role in ['admin_perpus', 'kepala_perpustakaan']
+      );
+    }
+
     function isStaff() {
       return isAdmin() || (
         hasStaffDoc()
@@ -104,13 +112,14 @@ service cloud.firestore {
 
     function isValidUserProfile(data) {
       return data.keys().hasAll(['uid', 'email', 'fullName', 'role', 'isActive', 'createdAt', 'updatedAt'])
-        && data.keys().hasOnly(['uid', 'email', 'fullName', 'role', 'requestedRole', 'approvalStatus', 'memberId', 'memberCode', 'isActive', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly(['uid', 'email', 'fullName', 'role', 'requestedRole', 'approvalStatus', 'assignedClass', 'memberId', 'memberCode', 'isActive', 'createdAt', 'updatedAt'])
         && isValidId(data.uid)
         && isNonEmptyString(data.email, 160)
         && isNonEmptyString(data.fullName, 120)
         && isValidRoleSlug(data.role)
         && (!('requestedRole' in data) || isOptionalString(data.requestedRole, 64))
         && (!('approvalStatus' in data) || data.approvalStatus in ['approved', 'pending', 'rejected'])
+        && (!('assignedClass' in data) || isOptionalString(data.assignedClass, 60))
         && (!('memberId' in data) || isOptionalString(data.memberId, 128))
         && (!('memberCode' in data) || isOptionalString(data.memberCode, 64))
         && data.isActive is bool
@@ -617,13 +626,17 @@ service cloud.firestore {
           'updatedByUid', 'createdAt', 'updatedAt'
         ])
         && data.keys().hasOnly([
-          'className', 'gradeLevel', 'homeroomTeacher', 'companionTeacher', 'students',
+          'className', 'gradeLevel', 'homeroomTeacher', 'companionTeacher',
+          'roomLabel', 'notes', 'archived', 'students',
           'updatedByUid', 'createdAt', 'updatedAt'
         ])
         && isNonEmptyString(data.className, 40)
         && data.gradeLevel is number && data.gradeLevel >= 1 && data.gradeLevel <= 6
         && isNonEmptyString(data.homeroomTeacher, 120)
         && isNonEmptyString(data.companionTeacher, 120)
+        && (!('roomLabel' in data) || isOptionalString(data.roomLabel, 60))
+        && (!('notes' in data) || isOptionalString(data.notes, 240))
+        && (!('archived' in data) || data.archived is bool)
         && data.students is list && data.students.size() <= 60
         && (data.students.size() == 0 || data.students[0] is map)
         && isValidId(data.updatedByUid)
@@ -660,6 +673,53 @@ service cloud.firestore {
         && data.createdAt is timestamp;
     }
 
+    function isValidPublicClass(data) {
+      return data.keys().hasAll(['className', 'gradeLevel', 'homeroomTeacher', 'companionTeacher', 'archived', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly(['className', 'gradeLevel', 'homeroomTeacher', 'companionTeacher', 'archived', 'createdAt', 'updatedAt'])
+        && isNonEmptyString(data.className, 40)
+        && data.gradeLevel is number && data.gradeLevel >= 1 && data.gradeLevel <= 12
+        && isOptionalString(data.homeroomTeacher, 120)
+        && isOptionalString(data.companionTeacher, 120)
+        && data.archived is bool
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidRegistrationRequest(data) {
+      return data.keys().hasAll(['requestCode', 'requesterUid', 'email', 'fullName', 'requestedRole', 'assignedClass', 'teacherSlot', 'hasConflict', 'status', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly([
+          'requestCode', 'requesterUid', 'email', 'fullName', 'requestedRole', 'assignedClass', 'teacherSlot',
+          'unitOrClass', 'identityNumber', 'gender', 'phone', 'extraMeta', 'hasConflict', 'conflictType',
+          'conflictExistingValue', 'conflictSummary', 'status', 'decisionNote', 'resolution',
+          'reviewedByUid', 'reviewedByName', 'reviewedAt', 'createdAt', 'updatedAt'
+        ])
+        && isNonEmptyString(data.requestCode, 40)
+        && isValidId(data.requesterUid)
+        && isNonEmptyString(data.email, 160)
+        && isNonEmptyString(data.fullName, 120)
+        && isValidRoleSlug(data.requestedRole)
+        && data.requestedRole != 'super_admin'
+        && isOptionalString(data.assignedClass, 60)
+        && data.teacherSlot in ['', 'homeroom', 'companion']
+        && (!('unitOrClass' in data) || isOptionalString(data.unitOrClass, 120))
+        && (!('identityNumber' in data) || isOptionalString(data.identityNumber, 64))
+        && (!('gender' in data) || isOptionalString(data.gender, 24))
+        && (!('phone' in data) || isOptionalString(data.phone, 32))
+        && (!('extraMeta' in data) || data.extraMeta is map)
+        && data.hasConflict is bool
+        && (!('conflictType' in data) || isOptionalString(data.conflictType, 64))
+        && (!('conflictExistingValue' in data) || isOptionalString(data.conflictExistingValue, 160))
+        && (!('conflictSummary' in data) || isOptionalString(data.conflictSummary, 400))
+        && data.status in ['pending', 'approved', 'rejected']
+        && (!('decisionNote' in data) || isOptionalString(data.decisionNote, 240))
+        && (!('resolution' in data) || data.resolution is map)
+        && (!('reviewedByUid' in data) || isOptionalString(data.reviewedByUid, 128))
+        && (!('reviewedByName' in data) || isOptionalString(data.reviewedByName, 120))
+        && (!('reviewedAt' in data) || isOptionalString(data.reviewedAt, 40))
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
     // --- Collection Rules ---
 
     // 1. Connection Check Document
@@ -668,19 +728,19 @@ service cloud.firestore {
       allow list, create, update, delete: if false;
     }
 
-    // 2. Staff Role Registry (Admin-managed)
+    // 2. Staff Role Registry (Admin & Account Approvers for non-super_admin)
     match /staff_roles/{uid} {
-      allow get: if isValidId(uid) && (isOwner(uid) || isAdmin());
-      allow list: if isAdmin();
+      allow get: if isValidId(uid) && (isOwner(uid) || isAccountApprover());
+      allow list: if isAccountApprover();
       allow create: if isValidId(uid)
-        && isAdmin()
+        && (isAdmin() || (isAccountApprover() && incoming().role != 'super_admin'))
         && isValidStaffRole(incoming())
         && incoming().uid == uid
         && incoming().assignedByUid == request.auth.uid
         && incoming().createdAt == request.time
         && incoming().updatedAt == request.time;
       allow update: if isValidId(uid)
-        && isAdmin()
+        && (isAdmin() || (isAccountApprover() && incoming().role != 'super_admin' && existing().role != 'super_admin'))
         && isValidStaffRole(incoming())
         && incoming().diff(existing()).affectedKeys().hasOnly(['email', 'fullName', 'role', 'isActive', 'assignedByUid', 'updatedAt'])
         && incoming().uid == existing().uid
@@ -695,13 +755,17 @@ service cloud.firestore {
       allow get: if isValidId(uid) && (isOwner(uid) || isStaff());
       allow list: if isStaff();
       allow create: if isValidId(uid)
-        && isOwner(uid)
         && isValidUserProfile(incoming())
-        && incoming().uid == request.auth.uid
-        && incoming().role == 'anggota'
-        && incoming().isActive == true
+        && incoming().uid == uid
         && incoming().createdAt == request.time
-        && incoming().updatedAt == request.time;
+        && incoming().updatedAt == request.time
+        && (
+          (isOwner(uid)
+            && incoming().role in ['anggota', 'siswa', 'duta_literasi', 'wali_kelas', 'guru_pendamping', 'guru_mapel', 'guru_bk', 'komite_sekolah', 'petugas_kebersihan_keamanan', 'pengunjung']
+            && incoming().isActive == true)
+          || (isAdmin())
+          || (isAccountApprover() && incoming().role != 'super_admin')
+        );
       allow update: if isVerifiedUser()
         && isValidId(uid)
         && isValidUserProfile(incoming())
@@ -709,10 +773,11 @@ service cloud.firestore {
         && incoming().createdAt == existing().createdAt
         && incoming().updatedAt == request.time
         && (
-          (isAdmin() && incoming().diff(existing()).affectedKeys().hasOnly(['fullName', 'email', 'role', 'requestedRole', 'approvalStatus', 'memberId', 'memberCode', 'isActive', 'updatedAt']))
-          || (isOwner(uid) && incoming().role == existing().role && incoming().isActive == existing().isActive && incoming().diff(existing()).affectedKeys().hasOnly(['fullName', 'memberId', 'memberCode', 'updatedAt']))
+          (isAdmin() && incoming().diff(existing()).affectedKeys().hasOnly(['fullName', 'email', 'role', 'requestedRole', 'approvalStatus', 'assignedClass', 'memberId', 'memberCode', 'isActive', 'updatedAt']))
+          || (isAccountApprover() && incoming().role != 'super_admin' && existing().role != 'super_admin' && incoming().diff(existing()).affectedKeys().hasOnly(['fullName', 'email', 'role', 'requestedRole', 'approvalStatus', 'assignedClass', 'memberId', 'memberCode', 'isActive', 'updatedAt']))
+          || (isOwner(uid) && incoming().role == existing().role && incoming().isActive == existing().isActive && incoming().diff(existing()).affectedKeys().hasOnly(['fullName', 'assignedClass', 'memberId', 'memberCode', 'updatedAt']))
         );
-      allow delete: if false;
+      allow delete: if isValidId(uid) && isAdmin() && uid != request.auth.uid;
     }
 
     // 4. Public Catalog OPAC (Zero PII)
@@ -741,7 +806,7 @@ service cloud.firestore {
             'availableCopies', 'shelfLocations', 'borrowCount', 'archived', 'updatedAt'
           ])
         );
-      allow delete: if false;
+      allow delete: if isValidId(bookId) && isAdmin();
     }
 
     // 5. Books Master
@@ -772,7 +837,7 @@ service cloud.firestore {
             'isReferenceOnly', 'readInPlaceOnly', 'isFeatured', 'borrowCount', 'archived', 'updatedAt'
           ])
         );
-      allow delete: if false;
+      allow delete: if isValidId(bookId) && isAdmin();
     }
 
     // 6. Physical Book Copies
@@ -797,7 +862,7 @@ service cloud.firestore {
           isAdmin()
           || incoming().diff(existing()).affectedKeys().hasOnly(['bookTitle', 'shelfId', 'shelfCode', 'shelfName', 'condition', 'status', 'notes', 'archived', 'updatedAt'])
         );
-      allow delete: if false;
+      allow delete: if isValidId(copyId) && isAdmin();
     }
 
     // 7. Members (PII Restricted)
@@ -828,7 +893,7 @@ service cloud.firestore {
             'ownerUid', 'archived', 'updatedAt'
           ])
         );
-      allow delete: if false;
+      allow delete: if isValidId(memberId) && isAdmin();
     }
 
     // 8. Membership Types
@@ -860,7 +925,7 @@ service cloud.firestore {
         && isValidCategory(incoming())
         && incoming().diff(existing()).affectedKeys().hasOnly(['code', 'name'])
         && incoming().createdAt == existing().createdAt;
-      allow delete: if false;
+      allow delete: if isValidId(categoryId) && isAdmin();
     }
 
     // 10. Locations
@@ -876,7 +941,7 @@ service cloud.firestore {
         && isValidLocation(incoming())
         && incoming().diff(existing()).affectedKeys().hasOnly(['building', 'floor', 'room', 'description'])
         && incoming().createdAt == existing().createdAt;
-      allow delete: if false;
+      allow delete: if isValidId(locationId) && isAdmin();
     }
 
     // 11. Shelves
@@ -893,7 +958,7 @@ service cloud.firestore {
         && isValidShelf(incoming())
         && incoming().diff(existing()).affectedKeys().hasOnly(['name', 'capacity', 'building', 'room'])
         && incoming().createdAt == existing().createdAt;
-      allow delete: if false;
+      allow delete: if isValidId(shelfId) && isAdmin();
     }
 
     // 12. Loans (Circulation & Terminal Lock on 'Selesai')
@@ -920,7 +985,7 @@ service cloud.firestore {
           isAdmin()
           || incoming().diff(existing()).affectedKeys().hasOnly(['dueDate', 'status', 'items', 'notes', 'updatedAt'])
         );
-      allow delete: if false;
+      allow delete: if isValidId(loanId) && isAdmin();
     }
 
     // 13. Returns (Append-Only Ledger)
@@ -934,7 +999,8 @@ service cloud.firestore {
         && existsAfter(/databases/$(database)/documents/book_copies/$(incoming().copyId))
         && incoming().staffUid == request.auth.uid
         && incoming().createdAt == request.time;
-      allow update, delete: if false;
+      allow update: if false;
+      allow delete: if isValidId(returnId) && isAdmin();
     }
 
     // 14. Reservations
@@ -963,7 +1029,7 @@ service cloud.firestore {
           || (isStaff() && incoming().diff(existing()).affectedKeys().hasOnly(['copyId', 'inventoryCode', 'queuePosition', 'status', 'expiresAt', 'notes', 'updatedAt']))
           || (existing().ownerUid == request.auth.uid && incoming().status == 'Dibatalkan' && incoming().diff(existing()).affectedKeys().hasOnly(['status', 'updatedAt']))
         );
-      allow delete: if false;
+      allow delete: if isValidId(reservationId) && isAdmin();
     }
 
     // 15. Fines (Terminal Lock on 'Lunas' / 'Dibebaskan')
@@ -992,7 +1058,7 @@ service cloud.firestore {
           || (incoming().status != 'Dibebaskan' && incoming().diff(existing()).affectedKeys().hasOnly(['paidAmount', 'status', 'updatedAt']))
           || (isKepala() && incoming().diff(existing()).affectedKeys().hasOnly(['waivedAmount', 'status', 'reason', 'updatedAt']))
         );
-      allow delete: if false;
+      allow delete: if isValidId(fineId) && isAdmin();
     }
 
     // 16. Payments (Append-Only Financial Ledger)
@@ -1005,7 +1071,8 @@ service cloud.firestore {
         && existsAfter(/databases/$(database)/documents/fines/$(incoming().fineId))
         && incoming().receivedByUid == request.auth.uid
         && incoming().createdAt == request.time;
-      allow update, delete: if false;
+      allow update: if false;
+      allow delete: if isValidId(paymentId) && isAdmin();
     }
 
     // 17. Suppliers
@@ -1021,7 +1088,7 @@ service cloud.firestore {
         && isValidSupplier(incoming())
         && incoming().diff(existing()).affectedKeys().hasOnly(['name', 'contactPerson', 'phone', 'email', 'address'])
         && incoming().createdAt == existing().createdAt;
-      allow delete: if false;
+      allow delete: if isValidId(supplierId) && isAdmin();
     }
 
     // 18. Acquisitions (Kepala approval + Terminal Lock on 'Selesai' / 'Ditolak')
@@ -1048,7 +1115,7 @@ service cloud.firestore {
           || (isKepala() && incoming().diff(existing()).affectedKeys().hasOnly(['status', 'approvedByUid', 'approvedByName', 'orderDate', 'receivedDate', 'items', 'notes', 'updatedAt']))
           || (!(incoming().status in ['Disetujui', 'Ditolak']) && incoming().diff(existing()).affectedKeys().hasOnly(['status', 'orderDate', 'receivedDate', 'items', 'notes', 'updatedAt']))
         );
-      allow delete: if false;
+      allow delete: if isValidId(acquisitionId) && isAdmin();
     }
 
     // 19. Inventory Audits (Stock Opname)
@@ -1074,7 +1141,7 @@ service cloud.firestore {
           isAdmin()
           || incoming().diff(existing()).affectedKeys().hasOnly(['completedAt', 'status', 'totalExpected', 'totalScanned', 'totalDiscrepancy', 'notes', 'items', 'updatedAt'])
         );
-      allow delete: if false;
+      allow delete: if isValidId(auditId) && isAdmin();
     }
 
     // 20. Notifications
@@ -1094,7 +1161,7 @@ service cloud.firestore {
         && incoming().updatedAt == request.time
         && (isStaff() || existing().targetUid == request.auth.uid)
         && incoming().diff(existing()).affectedKeys().hasOnly(['isRead', 'updatedAt']);
-      allow delete: if false;
+      allow delete: if isValidId(notificationId) && isAdmin();
     }
 
     // 21. Library Settings & RBAC Matrix
@@ -1107,12 +1174,14 @@ service cloud.firestore {
         && incoming().updatedByUid == request.auth.uid
         && incoming().updatedAt == request.time;
       allow update: if isValidId(settingId)
-        && isAdmin()
         && isValidLibrarySetting(incoming())
         && incoming().kind == existing().kind
         && incoming().updatedByUid == request.auth.uid
         && incoming().updatedAt == request.time
-        && incoming().diff(existing()).affectedKeys().hasOnly(['values', 'rolePermissions', 'customRoles', 'seeded', 'updatedByUid', 'updatedAt']);
+        && (
+          (isAdmin() && incoming().diff(existing()).affectedKeys().hasOnly(['values', 'rolePermissions', 'customRoles', 'seeded', 'updatedByUid', 'updatedAt']))
+          || (isAccountApprover() && settingId == 'global' && incoming().diff(existing()).affectedKeys().hasOnly(['values', 'updatedByUid', 'updatedAt']))
+        );
       allow delete: if false;
     }
 
@@ -1155,7 +1224,7 @@ service cloud.firestore {
             'sessionLogs', 'archived', 'updatedAt'
           ])
         );
-      allow delete: if false;
+      allow delete: if isValidId(scheduleId) && isAdmin();
     }
 
     // 24. School Classes (Wali Kelas, Guru Pendamping & Daftar Siswa)
@@ -1169,20 +1238,80 @@ service cloud.firestore {
         && incoming().createdAt == request.time
         && incoming().updatedAt == request.time;
       allow update: if isValidId(classId)
-        && isStaff()
         && isValidSchoolClass(incoming())
         && incoming().className == existing().className
         && incoming().gradeLevel == existing().gradeLevel
         && incoming().createdAt == existing().createdAt
         && incoming().updatedByUid == request.auth.uid
         && incoming().updatedAt == request.time
-        && incoming().diff(existing()).affectedKeys().hasOnly([
-          'homeroomTeacher', 'companionTeacher', 'students', 'updatedByUid', 'updatedAt'
-        ]);
-      allow delete: if false;
+        && (
+          (isStaff() && incoming().diff(existing()).affectedKeys().hasOnly([
+            'homeroomTeacher', 'companionTeacher', 'roomLabel', 'notes', 'archived',
+            'students', 'updatedByUid', 'updatedAt'
+          ]))
+          || (isVerifiedUser()
+            && existing().homeroomTeacher in ['', '-']
+            && incoming().diff(existing()).affectedKeys().hasOnly(['homeroomTeacher', 'updatedByUid', 'updatedAt']))
+          || (isVerifiedUser()
+            && existing().companionTeacher in ['', '-']
+            && incoming().diff(existing()).affectedKeys().hasOnly(['companionTeacher', 'updatedByUid', 'updatedAt']))
+        );
+      allow delete: if isValidId(classId) && isAdmin();
     }
 
-    // 25. Backup Snapshots (Admin-Only, Append-Only, Cleanable by Admin)
+    // 25. Public Classes Projection (Zero PII — Dropdown Pendaftaran)
+    match /public_classes/{classId} {
+      allow get: if isValidId(classId) && resource.data.archived == false;
+      allow list: if resource.data.archived == false;
+      allow create: if isValidId(classId)
+        && isStaff()
+        && isValidPublicClass(incoming())
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time;
+      allow update: if isValidId(classId)
+        && isValidPublicClass(incoming())
+        && incoming().className == existing().className
+        && incoming().gradeLevel == existing().gradeLevel
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && (
+          (isStaff() && incoming().diff(existing()).affectedKeys().hasOnly(['homeroomTeacher', 'companionTeacher', 'archived', 'updatedAt']))
+          || (isVerifiedUser()
+            && existing().homeroomTeacher in ['', '-']
+            && incoming().diff(existing()).affectedKeys().hasOnly(['homeroomTeacher', 'updatedAt']))
+          || (isVerifiedUser()
+            && existing().companionTeacher in ['', '-']
+            && incoming().diff(existing()).affectedKeys().hasOnly(['companionTeacher', 'updatedAt']))
+        );
+      allow delete: if isValidId(classId) && isAdmin();
+    }
+
+    // 26. Registration Requests (Pending Queue & Conflict Resolution)
+    match /registration_requests/{requestId} {
+      allow get: if isValidId(requestId) && (isAccountApprover() || (isVerifiedUser() && existing().requesterUid == request.auth.uid));
+      allow list: if isAccountApprover() || (isVerifiedUser() && resource.data.requesterUid == request.auth.uid);
+      allow create: if isValidId(requestId)
+        && isVerifiedUser()
+        && isValidRegistrationRequest(incoming())
+        && incoming().requesterUid == request.auth.uid
+        && incoming().status == 'pending'
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time;
+      allow update: if isValidId(requestId)
+        && isAccountApprover()
+        && isValidRegistrationRequest(incoming())
+        && existing().status == 'pending'
+        && incoming().requesterUid == existing().requesterUid
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && incoming().diff(existing()).affectedKeys().hasOnly([
+          'status', 'decisionNote', 'resolution', 'reviewedByUid', 'reviewedByName', 'reviewedAt', 'updatedAt'
+        ]);
+      allow delete: if isValidId(requestId)
+        && (isAccountApprover() || (isVerifiedUser() && existing().requesterUid == request.auth.uid && existing().status != 'approved'));
+    }
+
+    // 27. Backup Snapshots (Admin-Only, Append-Only, Cleanable by Admin)
     match /backup_snapshots/{snapshotId} {
       allow get: if isValidId(snapshotId) && isAdmin();
       allow list: if isAdmin();

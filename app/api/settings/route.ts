@@ -1,10 +1,20 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getDb, getSettingsMap } from '@/lib/db';
-import { requirePermission } from '@/lib/auth/session';
+import { requireAuth, requirePermission } from '@/lib/auth/session';
 import { hashPassword } from '@/lib/auth/crypto';
 import { logAudit } from '@/lib/db/audit';
-import { ensureMemberRecordForUser } from '@/lib/db/member-link';
+import {
+  ensureMemberRecordForUser,
+  syncStudentToClassRoster,
+  syncTeacherToClassAndSchedules,
+} from '@/lib/db/member-link';
 import { addDaysIso, formatIsoDate } from '@/lib/domain/library-rules';
+import { compareClassNames } from '@/lib/domain/reading-schedule-rules';
+import {
+  canApproverAssignRole,
+  canRoleApproveRegistrations,
+  normalizeTeacherDisplay,
+} from '@/lib/domain/signup-rules';
 import {
   DEFAULT_SYSTEM_SETTINGS,
   SYSTEM_ROLE_SLUGS,
@@ -100,6 +110,131 @@ export async function GET() {
     settings.backup_auto_frequency || 'weekly'
   );
 
+  const rawClasses = db
+    .prepare(
+      `SELECT id, class_name, grade_level, homeroom_teacher, companion_teacher
+       FROM school_classes
+       WHERE archived_at IS NULL`
+    )
+    .all() as Array<{
+    id: number;
+    class_name: string;
+    grade_level: number;
+    homeroom_teacher: string;
+    companion_teacher: string;
+  }>;
+
+  const schoolClasses = rawClasses
+    .sort((a, b) => compareClassNames(a.class_name, b.class_name))
+    .map((c) => ({
+      id: c.id,
+      className: c.class_name,
+      gradeLevel: c.grade_level,
+      homeroomTeacher: normalizeTeacherDisplay(c.homeroom_teacher),
+      companionTeacher: normalizeTeacherDisplay(c.companion_teacher),
+    }));
+
+  const classByName = new Map(schoolClasses.map((c) => [c.className, c]));
+
+  const rawRequests = db
+    .prepare(
+      `SELECT rr.id, rr.request_code, rr.username, rr.email, rr.full_name,
+              rr.requested_role_id, rr.requested_role_slug, r.name as requested_role_name,
+              rr.assigned_class, rr.teacher_slot, rr.unit_or_class, rr.identity_number,
+              rr.gender, rr.phone, rr.extra_meta_json,
+              rr.has_conflict, rr.conflict_type, rr.conflict_existing_value,
+              rr.conflict_existing_user_id, rr.conflict_summary,
+              rr.status, rr.decision_note, rr.resolution_json,
+              rr.reviewed_by_name, rr.reviewed_at, rr.created_at, rr.updated_at
+       FROM registration_requests rr
+       JOIN roles r ON r.id = rr.requested_role_id
+       ORDER BY CASE WHEN rr.status = 'pending' THEN 0 ELSE 1 END, rr.created_at DESC, rr.id DESC
+       LIMIT 100`
+    )
+    .all() as Array<{
+    id: number;
+    request_code: string;
+    username: string;
+    email: string;
+    full_name: string;
+    requested_role_id: number;
+    requested_role_slug: string;
+    requested_role_name: string;
+    assigned_class: string;
+    teacher_slot: string;
+    unit_or_class: string;
+    identity_number: string;
+    gender: string;
+    phone: string;
+    extra_meta_json: string;
+    has_conflict: number;
+    conflict_type: string;
+    conflict_existing_value: string;
+    conflict_existing_user_id: number | null;
+    conflict_summary: string;
+    status: string;
+    decision_note: string;
+    resolution_json: string;
+    reviewed_by_name: string;
+    reviewed_at: string | null;
+    created_at: string;
+    updated_at: string;
+  }>;
+
+  const registrationRequests = rawRequests.map((rr) => {
+    let extraMeta: Record<string, string> = {};
+    let resolution: Record<string, unknown> = {};
+    try {
+      extraMeta = JSON.parse(rr.extra_meta_json || '{}');
+    } catch {
+      extraMeta = {};
+    }
+    try {
+      resolution = JSON.parse(rr.resolution_json || '{}');
+    } catch {
+      resolution = {};
+    }
+    const liveClass = rr.assigned_class ? classByName.get(rr.assigned_class) : undefined;
+    const liveExistingValue =
+      rr.teacher_slot === 'homeroom'
+        ? liveClass?.homeroomTeacher || rr.conflict_existing_value
+        : rr.teacher_slot === 'companion'
+          ? liveClass?.companionTeacher || rr.conflict_existing_value
+          : rr.requested_role_slug === 'kepala_sekolah'
+            ? settings.principal_name || rr.conflict_existing_value
+            : rr.requested_role_slug === 'kepala_perpustakaan'
+              ? settings.librarian_head_name || rr.conflict_existing_value
+              : rr.conflict_existing_value;
+
+    return {
+      id: rr.id,
+      requestCode: rr.request_code,
+      username: rr.username,
+      email: rr.email,
+      fullName: rr.full_name,
+      requestedRoleId: rr.requested_role_id,
+      requestedRoleSlug: rr.requested_role_slug,
+      requestedRoleName: rr.requested_role_name,
+      assignedClass: rr.assigned_class,
+      teacherSlot: rr.teacher_slot as 'homeroom' | 'companion' | '',
+      unitOrClass: rr.unit_or_class,
+      identityNumber: rr.identity_number,
+      gender: rr.gender,
+      phone: rr.phone,
+      extraMeta,
+      hasConflict: rr.has_conflict === 1,
+      conflictType: rr.conflict_type,
+      conflictExistingValue: liveExistingValue,
+      conflictSummary: rr.conflict_summary,
+      status: rr.status as 'pending' | 'approved' | 'rejected',
+      decisionNote: rr.decision_note,
+      resolution,
+      reviewedByName: rr.reviewed_by_name,
+      reviewedAt: rr.reviewed_at,
+      createdAt: rr.created_at,
+    };
+  });
+
   return NextResponse.json({
     settings,
     membershipTypes,
@@ -107,6 +242,8 @@ export async function GET() {
     permissions,
     rolePermissions,
     users,
+    registrationRequests,
+    schoolClasses,
     auditLogs,
     backupSummary: {
       snapshotCount: snapshotCountRow.c,
@@ -117,10 +254,6 @@ export async function GET() {
 }
 
 export async function PUT(req: NextRequest) {
-  const { user: auth, errorResponse } = await requirePermission('settings.write');
-  if (errorResponse) return errorResponse;
-  const db = getDb();
-
   let body: Record<string, unknown>;
   try {
     body = (await req.json()) as Record<string, unknown>;
@@ -129,6 +262,35 @@ export async function PUT(req: NextRequest) {
   }
 
   const section = String(body.section || '');
+  const isApprovalSection =
+    section === 'approve_registration' ||
+    section === 'reject_registration' ||
+    section === 'approve_user' ||
+    section === 'reject_user';
+
+  let auth: NonNullable<Awaited<ReturnType<typeof requireAuth>>['user']>;
+  if (isApprovalSection) {
+    const authRes = await requireAuth();
+    if (authRes.errorResponse || !authRes.user) {
+      return authRes.errorResponse!;
+    }
+    if (!canRoleApproveRegistrations(authRes.user.roleSlug) && !authRes.user.permissions.includes('*')) {
+      return NextResponse.json(
+        {
+          error:
+            'Hanya Super Admin, Admin Perpustakaan, atau Kepala Perpustakaan yang dapat meninjau dan menyetujui pendaftaran akun.',
+        },
+        { status: 403 }
+      );
+    }
+    auth = authRes.user;
+  } else {
+    const permRes = await requirePermission('settings.write');
+    if (permRes.errorResponse || !permRes.user) return permRes.errorResponse!;
+    auth = permRes.user;
+  }
+
+  const db = getDb();
 
   // 1. Update general & backup policy settings
   if (section === 'general') {
@@ -603,6 +765,10 @@ export async function PUT(req: NextRequest) {
       return NextResponse.json({ error: 'Peran yang dipilih tidak valid.' }, { status: 400 });
     }
 
+    const assignedClass = String(body.assignedClass || '').trim().slice(0, 60);
+    const unitOrClass = String(body.unitOrClass || assignedClass || '').trim().slice(0, 100);
+    const syncToClass = body.syncToClass === true;
+
     const prefix = getSettingsMap(db).member_code_prefix || 'AGT-2026-';
     let userId = 0;
     db.transaction(() => {
@@ -614,22 +780,40 @@ export async function PUT(req: NextRequest) {
               email,
               roleSlug: roleExists.slug,
               roleName: roleExists.name,
+              unitOrClass,
+              assignedClass,
               memberCodePrefix: prefix,
             });
       const res = db
         .prepare(
-          `INSERT INTO users (username, email, full_name, password_hash, role_id, member_id, is_active, approval_status, approved_by_user_id, approved_at)
-           VALUES (?, ?, ?, ?, ?, ?, 1, 'approved', ?, datetime('now'))`
+          `INSERT INTO users (username, email, full_name, password_hash, role_id, member_id, assigned_class, is_active, approval_status, approved_by_user_id, approved_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, 1, 'approved', ?, datetime('now'))`
         )
-        .run(username, email, fullName, hashPassword(password), roleId, linkedMemberId, auth.id);
+        .run(username, email, fullName, hashPassword(password), roleId, linkedMemberId, assignedClass, auth.id);
       userId = Number(res.lastInsertRowid);
+
+      if (assignedClass && (roleExists.slug === 'siswa' || roleExists.slug === 'duta_literasi')) {
+        syncStudentToClassRoster(db, { className: assignedClass, fullName });
+      } else if (
+        syncToClass &&
+        assignedClass &&
+        (roleExists.slug === 'wali_kelas' || roleExists.slug === 'guru_pendamping')
+      ) {
+        syncTeacherToClassAndSchedules(db, {
+          className: assignedClass,
+          slot: roleExists.slug === 'wali_kelas' ? 'homeroom' : 'companion',
+          teacherName: fullName,
+          syncSchedules: true,
+        });
+      }
+
       logAudit(db, {
         userId: auth.id,
         userName: auth.fullName,
         action: 'USER_CREATE',
         entityType: 'user',
         entityId: String(userId),
-        after: { username, email, fullName, roleId, roleName: roleExists.name },
+        after: { username, email, fullName, roleId, roleName: roleExists.name, assignedClass, syncToClass },
       });
     })();
     return NextResponse.json({ ok: true, id: userId });
@@ -744,14 +928,305 @@ export async function PUT(req: NextRequest) {
     return NextResponse.json({ ok: true });
   }
 
-  // 9b. Approve pending sign-up user (Super Admin only)
-  if (section === 'approve_user') {
-    if (!isSuperAdmin) {
+  // 9a. Approve pending registration request with granular conflict resolution
+  if (section === 'approve_registration') {
+    const requestId = Number(body.requestId || 0);
+    const note = String(body.note || '').trim().slice(0, 240);
+    const applyClassTeacherSync = body.applyClassTeacherSync === true;
+    const syncSchedules = body.syncSchedules !== false;
+    const applyLeadershipSync = body.applyLeadershipSync === true;
+    const applyStudentRosterSync = body.applyStudentRosterSync !== false;
+
+    const reqRow = db
+      .prepare(
+        `SELECT * FROM registration_requests WHERE id = ?`
+      )
+      .get(requestId) as
+      | {
+          id: number;
+          request_code: string;
+          username: string;
+          email: string;
+          full_name: string;
+          password_hash: string;
+          requested_role_id: number;
+          requested_role_slug: string;
+          assigned_class: string;
+          teacher_slot: string;
+          unit_or_class: string;
+          identity_number: string;
+          gender: string;
+          phone: string;
+          extra_meta_json: string;
+          has_conflict: number;
+          conflict_type: string;
+          conflict_existing_value: string;
+          status: string;
+        }
+      | undefined;
+
+    if (!reqRow) {
+      return NextResponse.json({ error: 'Permintaan pendaftaran tidak ditemukan.' }, { status: 404 });
+    }
+    if (reqRow.status !== 'pending') {
       return NextResponse.json(
-        { error: 'Hanya Super Admin yang dapat menyetujui pendaftaran akun.' },
+        { error: `Permintaan ini sudah diproses sebelumnya dengan status "${reqRow.status}".` },
+        { status: 409 }
+      );
+    }
+
+    const overrideRoleId = body.roleId ? Number(body.roleId) : reqRow.requested_role_id;
+    const overrideRoleSlug = typeof body.roleSlug === 'string' ? body.roleSlug.trim() : '';
+    const finalRole = (
+      overrideRoleSlug
+        ? db.prepare('SELECT id, slug, name FROM roles WHERE slug = ?').get(overrideRoleSlug)
+        : db.prepare('SELECT id, slug, name FROM roles WHERE id = ?').get(overrideRoleId)
+    ) as { id: number; slug: string; name: string } | undefined;
+
+    if (!finalRole) {
+      return NextResponse.json({ error: 'Peran persetujuan tidak valid.' }, { status: 400 });
+    }
+    if (!canApproverAssignRole(auth.roleSlug, finalRole.slug)) {
+      return NextResponse.json(
+        { error: 'Anda tidak memiliki wewenang untuk menetapkan peran Super Admin.' },
         { status: 403 }
       );
     }
+
+    const dupUser = db
+      .prepare('SELECT id FROM users WHERE lower(email) = ? OR lower(username) = ?')
+      .get(reqRow.email.toLowerCase(), reqRow.username.toLowerCase());
+    if (dupUser) {
+      return NextResponse.json(
+        { error: 'Username atau email pendaftar sudah terpakai oleh akun aktif lain.' },
+        { status: 409 }
+      );
+    }
+
+    let extraMeta: Record<string, string> = {};
+    try {
+      extraMeta = JSON.parse(reqRow.extra_meta_json || '{}');
+    } catch {
+      extraMeta = {};
+    }
+
+    const settings = getSettingsMap(db);
+    const prefix = settings.member_code_prefix || 'AGT-2026-';
+    const classRow = reqRow.assigned_class
+      ? (db
+          .prepare('SELECT grade_level FROM school_classes WHERE class_name = ? AND archived_at IS NULL')
+          .get(reqRow.assigned_class) as { grade_level: number } | undefined)
+      : undefined;
+
+    const result = db.transaction(() => {
+      let memberId: number | null = null;
+      if (finalRole.slug !== 'super_admin' && finalRole.slug !== 'pengunjung') {
+        memberId = ensureMemberRecordForUser(db, {
+          fullName: reqRow.full_name,
+          email: reqRow.email,
+          roleSlug: finalRole.slug,
+          roleName: finalRole.name,
+          unitOrClass: reqRow.unit_or_class || reqRow.assigned_class || finalRole.name,
+          assignedClass: reqRow.assigned_class,
+          gradeLevel: classRow?.grade_level ?? null,
+          identityNumber: reqRow.identity_number,
+          gender: reqRow.gender,
+          phone: reqRow.phone,
+          memberSubStatus: extraMeta.memberSubStatus,
+          memberCodePrefix: prefix,
+        });
+      }
+
+      const assignedClassForUser =
+        (finalRole.slug === 'wali_kelas' || finalRole.slug === 'guru_pendamping') &&
+        !applyClassTeacherSync
+          ? ''
+          : reqRow.assigned_class;
+
+      const userId = Number(
+        db
+          .prepare(
+            `INSERT INTO users (
+               username, email, full_name, password_hash, role_id, member_id, assigned_class,
+               is_active, approval_status, requested_role_id, approval_note, approved_by_user_id, approved_at
+             ) VALUES (?, ?, ?, ?, ?, ?, ?, 1, 'approved', ?, ?, ?, datetime('now'))`
+          )
+          .run(
+            reqRow.username,
+            reqRow.email,
+            reqRow.full_name,
+            reqRow.password_hash,
+            finalRole.id,
+            memberId,
+            assignedClassForUser,
+            reqRow.requested_role_id,
+            note,
+            auth.id
+          ).lastInsertRowid
+      );
+
+      let classTeacherApplied = false;
+      let schedulesSyncedCount = 0;
+      let leadershipApplied = false;
+      let studentRosterSynced = false;
+
+      if (
+        applyClassTeacherSync &&
+        reqRow.assigned_class &&
+        (finalRole.slug === 'wali_kelas' || finalRole.slug === 'guru_pendamping')
+      ) {
+        const slot: 'homeroom' | 'companion' =
+          finalRole.slug === 'wali_kelas' ? 'homeroom' : 'companion';
+        const syncRes = syncTeacherToClassAndSchedules(db, {
+          className: reqRow.assigned_class,
+          slot,
+          teacherName: reqRow.full_name,
+          syncSchedules,
+        });
+        classTeacherApplied = syncRes.updatedClass;
+        schedulesSyncedCount = syncRes.updatedSchedules;
+      }
+
+      if (
+        applyStudentRosterSync &&
+        reqRow.assigned_class &&
+        (finalRole.slug === 'siswa' || finalRole.slug === 'duta_literasi')
+      ) {
+        const res = syncStudentToClassRoster(db, {
+          className: reqRow.assigned_class,
+          fullName: reqRow.full_name,
+          identityNumber: reqRow.identity_number,
+          gender: reqRow.gender,
+        });
+        studentRosterSynced = res.synced;
+      }
+
+      if (
+        applyLeadershipSync &&
+        (finalRole.slug === 'kepala_sekolah' || finalRole.slug === 'kepala_perpustakaan')
+      ) {
+        const settingKey =
+          finalRole.slug === 'kepala_sekolah' ? 'principal_name' : 'librarian_head_name';
+        db.prepare(
+          `INSERT INTO library_settings (key, value, updated_at, updated_by_user_id)
+           VALUES (?, ?, datetime('now'), ?)
+           ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = datetime('now'), updated_by_user_id = excluded.updated_by_user_id`
+        ).run(settingKey, reqRow.full_name, auth.id);
+        leadershipApplied = true;
+      }
+
+      const resolutionPayload = {
+        decision: 'approved',
+        finalRoleSlug: finalRole.slug,
+        finalRoleName: finalRole.name,
+        applyClassTeacherSync: classTeacherApplied,
+        syncSchedules: classTeacherApplied && syncSchedules,
+        schedulesSyncedCount,
+        applyLeadershipSync: leadershipApplied,
+        studentRosterSynced,
+        createdUserId: userId,
+      };
+
+      db.prepare(
+        `UPDATE registration_requests
+         SET status = 'approved', password_hash = '', decision_note = ?, resolution_json = ?,
+             reviewed_by_user_id = ?, reviewed_by_name = ?, reviewed_at = datetime('now'),
+             updated_at = datetime('now')
+         WHERE id = ?`
+      ).run(note, JSON.stringify(resolutionPayload), auth.id, auth.fullName, requestId);
+
+      db.prepare(
+        `INSERT INTO notifications (user_id, type, title, message, link)
+         VALUES (?, 'success', 'Pendaftaran Akun Disetujui', ?, '/catalog')`
+      ).run(
+        userId,
+        `Pendaftaran Anda (${reqRow.request_code}) disetujui oleh ${auth.fullName} sebagai "${finalRole.name}".`
+      );
+
+      logAudit(db, {
+        userId: auth.id,
+        userName: auth.fullName,
+        action: 'REGISTRATION_APPROVE',
+        entityType: 'registration_requests',
+        entityId: String(requestId),
+        before: {
+          requestCode: reqRow.request_code,
+          status: reqRow.status,
+          conflictExistingValue: reqRow.conflict_existing_value,
+        },
+        after: { ...resolutionPayload, note },
+      });
+
+      return { userId, resolutionPayload };
+    })();
+
+    return NextResponse.json({
+      ok: true,
+      userId: result.userId,
+      resolution: result.resolutionPayload,
+    });
+  }
+
+  // 9a-2. Reject pending registration request -> NO user/member created, NO class data modified
+  if (section === 'reject_registration') {
+    const requestId = Number(body.requestId || 0);
+    const note = String(body.note || '').trim().slice(0, 240);
+
+    const reqRow = db
+      .prepare('SELECT id, request_code, username, email, full_name, status, assigned_class FROM registration_requests WHERE id = ?')
+      .get(requestId) as
+      | {
+          id: number;
+          request_code: string;
+          username: string;
+          email: string;
+          full_name: string;
+          status: string;
+          assigned_class: string;
+        }
+      | undefined;
+
+    if (!reqRow) {
+      return NextResponse.json({ error: 'Permintaan pendaftaran tidak ditemukan.' }, { status: 404 });
+    }
+    if (reqRow.status !== 'pending') {
+      return NextResponse.json(
+        { error: `Permintaan ini sudah diproses sebelumnya dengan status "${reqRow.status}".` },
+        { status: 409 }
+      );
+    }
+
+    db.transaction(() => {
+      db.prepare(
+        `UPDATE registration_requests
+         SET status = 'rejected', password_hash = '', decision_note = ?,
+             resolution_json = ?, reviewed_by_user_id = ?, reviewed_by_name = ?,
+             reviewed_at = datetime('now'), updated_at = datetime('now')
+         WHERE id = ?`
+      ).run(
+        note,
+        JSON.stringify({ decision: 'rejected', accountCreated: false, classModified: false }),
+        auth.id,
+        auth.fullName,
+        requestId
+      );
+
+      logAudit(db, {
+        userId: auth.id,
+        userName: auth.fullName,
+        action: 'REGISTRATION_REJECT',
+        entityType: 'registration_requests',
+        entityId: String(requestId),
+        before: { requestCode: reqRow.request_code, status: reqRow.status, email: reqRow.email },
+        after: { status: 'rejected', accountCreated: false, note },
+      });
+    })();
+
+    return NextResponse.json({ ok: true, accountCreated: false });
+  }
+
+  // 9b. Approve legacy pending sign-up user (Super Admin / Admin Perpus / Kepala Perpus)
+  if (section === 'approve_user') {
     const userId = Number(body.userId || 0);
     const note = String(body.note || '').trim().slice(0, 240);
     const target = db
@@ -786,6 +1261,12 @@ export async function PUT(req: NextRequest) {
     if (!finalRole) {
       return NextResponse.json({ error: 'Peran persetujuan tidak valid.' }, { status: 400 });
     }
+    if (!canApproverAssignRole(auth.roleSlug, finalRole.slug)) {
+      return NextResponse.json(
+        { error: 'Anda tidak memiliki wewenang untuk menetapkan peran Super Admin.' },
+        { status: 403 }
+      );
+    }
 
     const prefix = getSettingsMap(db).member_code_prefix || 'AGT-2026-';
     db.transaction(() => {
@@ -810,10 +1291,10 @@ export async function PUT(req: NextRequest) {
 
       db.prepare(
         `INSERT INTO notifications (user_id, type, title, message, link)
-         VALUES (?, 'success', 'Akun Disetujui Super Admin', ?, '/catalog')`
+         VALUES (?, 'success', 'Akun Disetujui', ?, '/catalog')`
       ).run(
         userId,
-        `Akun Anda telah disetujui oleh Super Admin sebagai "${finalRole.name}" dan sekarang aktif.`
+        `Akun Anda telah disetujui oleh ${auth.fullName} sebagai "${finalRole.name}" dan sekarang aktif.`
       );
 
       logAudit(db, {
@@ -829,14 +1310,8 @@ export async function PUT(req: NextRequest) {
     return NextResponse.json({ ok: true });
   }
 
-  // 9c. Reject pending sign-up user (Super Admin only)
+  // 9c. Reject legacy pending sign-up user
   if (section === 'reject_user') {
-    if (!isSuperAdmin) {
-      return NextResponse.json(
-        { error: 'Hanya Super Admin yang dapat menolak pendaftaran akun.' },
-        { status: 403 }
-      );
-    }
     const userId = Number(body.userId || 0);
     const note = String(body.note || '').trim().slice(0, 240);
     if (userId === auth.id) {

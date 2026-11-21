@@ -24,15 +24,19 @@ import { useAuth } from '@/components/ui/AuthProvider';
 import { exportToCsv, exportToExcel, exportToPdf } from '@/lib/client/export';
 import {
   SD_CLASSES,
+  compareClassNames,
+  extractGradeLevel,
   summarizeSessionAttendance,
   type AttendanceStatus,
 } from '@/lib/domain/reading-schedule-rules';
+import { toSafeFilenameSlug } from '@/lib/domain/report-filters';
 import { cn } from '@/lib/utils';
 import { ClassAttendanceBarChart } from './ClassAttendanceBarChart';
-import type { ScheduleLogRow } from './types';
+import type { LiveClassPreset, ScheduleLogRow } from './types';
 
 interface AttendanceRecapPanelProps {
   logs: ScheduleLogRow[];
+  classes?: ReadonlyArray<Pick<LiveClassPreset, 'className' | 'gradeLevel'>>;
   initialClassFilter?: string;
 }
 
@@ -57,12 +61,33 @@ function AttendanceBadge({ status }: { status: AttendanceStatus }) {
 
 export function AttendanceRecapPanel({
   logs,
+  classes = SD_CLASSES,
   initialClassFilter = '',
 }: AttendanceRecapPanelProps) {
   const { library } = useAuth();
   const [classFilter, setClassFilter] = useState(initialClassFilter);
   const [q, setQ] = useState('');
   const [expandedIds, setExpandedIds] = useState<Record<string, boolean>>({});
+
+  const classOptions = useMemo(() => {
+    const map = new Map<string, { className: string; gradeLevel: number }>();
+    for (const c of classes) {
+      map.set(c.className.trim().toLowerCase(), {
+        className: c.className.trim(),
+        gradeLevel: c.gradeLevel,
+      });
+    }
+    for (const log of logs) {
+      const name = String(log.class_name || '').trim();
+      if (name && !map.has(name.toLowerCase())) {
+        map.set(name.toLowerCase(), {
+          className: name,
+          gradeLevel: extractGradeLevel(name),
+        });
+      }
+    }
+    return Array.from(map.values()).sort((a, b) => compareClassNames(a.className, b.className));
+  }, [classes, logs]);
 
   const searchMatchedLogs = useMemo(() => {
     const term = q.trim().toLowerCase();
@@ -173,19 +198,22 @@ export function AttendanceRecapPanel({
             ariaLabel="Cari rekap absensi sesi baca"
             className="w-full sm:w-72"
           />
-          <select
-            aria-label="Filter kelas pada rekap absensi"
-            value={classFilter}
-            onChange={(e) => setClassFilter(e.target.value)}
-            className="h-10 rounded-full border border-[#E2DFD7] bg-white px-3.5 text-xs text-[#1E2433] focus:border-[#222B3A] focus:outline-none"
-          >
-            <option value="">Semua Kelas (1A–6B)</option>
-            {SD_CLASSES.map((c) => (
-              <option key={c.className} value={c.className}>
-                {c.className}
-              </option>
-            ))}
-          </select>
+          <label className="inline-flex items-center gap-2 text-xs font-medium text-[#5C5E64]">
+            <span>Rombel/Kelas</span>
+            <select
+              aria-label="Filter Rombel/Kelas pada rekap absensi"
+              value={classFilter}
+              onChange={(e) => setClassFilter(e.target.value)}
+              className="h-10 rounded-full border border-[#E2DFD7] bg-white px-3.5 text-xs font-normal text-[#1E2433] focus:border-[#222B3A] focus:outline-none"
+            >
+              <option value="">Semua Rombel/Kelas ({classOptions.length})</option>
+              {classOptions.map((c) => (
+                <option key={c.className} value={c.className}>
+                  {c.className}
+                </option>
+              ))}
+            </select>
+          </label>
           {(q || classFilter) && (
             <Button
               variant="ghost"
@@ -205,7 +233,14 @@ export function AttendanceRecapPanel({
             variant="secondary"
             size="sm"
             disabled={exportRows.length === 0}
-            onClick={() => exportToCsv('rekap-absensi-sesi-baca', exportRows)}
+            onClick={() =>
+              exportToCsv(
+                classFilter
+                  ? `rekap-absensi-sesi-baca-${toSafeFilenameSlug(classFilter)}`
+                  : 'rekap-absensi-sesi-baca',
+                exportRows
+              )
+            }
           >
             <Download className="h-3.5 w-3.5" />
             CSV
@@ -214,7 +249,15 @@ export function AttendanceRecapPanel({
             variant="secondary"
             size="sm"
             disabled={exportRows.length === 0}
-            onClick={() => exportToExcel('rekap-absensi-sesi-baca', 'Rekap Absensi', exportRows)}
+            onClick={() =>
+              exportToExcel(
+                classFilter
+                  ? `rekap-absensi-sesi-baca-${toSafeFilenameSlug(classFilter)}`
+                  : 'rekap-absensi-sesi-baca',
+                classFilter ? `Rekap Absensi ${classFilter}` : 'Rekap Absensi',
+                exportRows
+              )
+            }
           >
             <Download className="h-3.5 w-3.5" />
             Excel
@@ -225,8 +268,12 @@ export function AttendanceRecapPanel({
             disabled={exportRows.length === 0}
             onClick={() =>
               exportToPdf(
-                'rekap-absensi-sesi-baca',
-                'Rekap Absensi Hadir & Tidak Hadir Sesi Baca Kelas SD',
+                classFilter
+                  ? `rekap-absensi-sesi-baca-${toSafeFilenameSlug(classFilter)}`
+                  : 'rekap-absensi-sesi-baca',
+                classFilter
+                  ? `Rekap Absensi Sesi Baca — ${classFilter}`
+                  : 'Rekap Absensi Hadir & Tidak Hadir Sesi Baca Kelas SD',
                 exportRows,
                 library
               )
@@ -281,9 +328,10 @@ export function AttendanceRecapPanel({
       {/* Recharts Class Attendance Comparison Chart */}
       <ClassAttendanceBarChart
         logs={searchMatchedLogs}
+        classes={classOptions}
         selectedClass={classFilter}
         onSelectClass={setClassFilter}
-        title="Grafik Kehadiran vs Tidak Hadir per Kelas"
+        title="Grafik Kehadiran vs Tidak Hadir per Rombel Kelas"
         description="Perbandingan total siswa hadir dan tidak hadir pada sesi literasi. Klik batang kelas untuk memfilter rekap di bawah."
       />
 

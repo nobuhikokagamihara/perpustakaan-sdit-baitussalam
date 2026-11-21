@@ -717,13 +717,16 @@
     },
     "SchoolClass": {
       "title": "SchoolClass",
-      "description": "Data kelas SD (1A–6B) berisi wali kelas, guru pendamping, dan daftar siswa aktif/arsip untuk absensi sesi baca.",
+      "description": "Data rombel kelas SD (termasuk rombel tambahan seperti Kelas 6D) berisi wali kelas, guru pendamping, ruang kelas, catatan, status arsip, dan daftar siswa untuk absensi sesi baca.",
       "type": "object",
       "properties": {
         "className": { "type": "string", "minLength": 1, "maxLength": 40 },
         "gradeLevel": { "type": "number" },
         "homeroomTeacher": { "type": "string", "minLength": 1, "maxLength": 120 },
         "companionTeacher": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "roomLabel": { "type": "string", "maxLength": 60 },
+        "notes": { "type": "string", "maxLength": 240 },
+        "archived": { "type": "boolean" },
         "students": { "type": "array" },
         "updatedByUid": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
         "createdAt": { "type": "string", "format": "date-time" },
@@ -775,6 +778,65 @@
         "createdByUid",
         "createdByName",
         "createdAt"
+      ]
+    },
+    "PublicClass": {
+      "title": "PublicClass",
+      "description": "Proyeksi rombel kelas bebas PII untuk dropdown pendaftaran akun siswa, wali kelas, dan guru pendamping.",
+      "type": "object",
+      "properties": {
+        "className": { "type": "string", "minLength": 2, "maxLength": 40 },
+        "gradeLevel": { "type": "integer", "minimum": 1, "maximum": 12 },
+        "homeroomTeacher": { "type": "string", "maxLength": 120 },
+        "companionTeacher": { "type": "string", "maxLength": 120 },
+        "archived": { "type": "boolean" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["className", "gradeLevel", "homeroomTeacher", "companionTeacher", "archived", "createdAt", "updatedAt"]
+    },
+    "RegistrationRequest": {
+      "title": "RegistrationRequest",
+      "description": "Permintaan pendaftaran akun berstatus pending/approved/rejected termasuk deteksi konflik wali kelas, guru pendamping, atau peran staf.",
+      "type": "object",
+      "properties": {
+        "requestCode": { "type": "string", "minLength": 4, "maxLength": 40 },
+        "requesterUid": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "email": { "type": "string", "format": "email", "maxLength": 160 },
+        "fullName": { "type": "string", "minLength": 2, "maxLength": 120 },
+        "requestedRole": { "type": "string", "minLength": 2, "maxLength": 64 },
+        "assignedClass": { "type": "string", "maxLength": 60 },
+        "teacherSlot": { "type": "string", "enum": ["", "homeroom", "companion"] },
+        "unitOrClass": { "type": "string", "maxLength": 120 },
+        "identityNumber": { "type": "string", "maxLength": 64 },
+        "gender": { "type": "string", "maxLength": 24 },
+        "phone": { "type": "string", "maxLength": 32 },
+        "extraMeta": { "type": "object" },
+        "hasConflict": { "type": "boolean" },
+        "conflictType": { "type": "string", "maxLength": 64 },
+        "conflictExistingValue": { "type": "string", "maxLength": 160 },
+        "conflictSummary": { "type": "string", "maxLength": 400 },
+        "status": { "type": "string", "enum": ["pending", "approved", "rejected"] },
+        "decisionNote": { "type": "string", "maxLength": 240 },
+        "resolution": { "type": "object" },
+        "reviewedByUid": { "type": "string", "maxLength": 128 },
+        "reviewedByName": { "type": "string", "maxLength": 120 },
+        "reviewedAt": { "type": "string", "maxLength": 40 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": [
+        "requestCode",
+        "requesterUid",
+        "email",
+        "fullName",
+        "requestedRole",
+        "assignedClass",
+        "teacherSlot",
+        "hasConflict",
+        "status",
+        "createdAt",
+        "updatedAt"
       ]
     }
   },
@@ -874,6 +936,14 @@
     "/school_classes/{classId}": {
       "schema": { "$ref": "#/entities/SchoolClass" },
       "description": "Daftar kelas SD (1A–6B), wali kelas, guru pendamping, dan daftar siswa per kelas."
+    },
+    "/public_classes/{classId}": {
+      "schema": { "$ref": "#/entities/PublicClass" },
+      "description": "Daftar rombel kelas publik bebas PII untuk dropdown pendaftaran akun."
+    },
+    "/registration_requests/{requestId}": {
+      "schema": { "$ref": "#/entities/RegistrationRequest" },
+      "description": "Antrean persetujuan pendaftaran akun dan resolusi konflik data guru/kelas."
     },
     "/backup_snapshots/{snapshotId}": {
       "schema": { "$ref": "#/entities/BackupSnapshot" },

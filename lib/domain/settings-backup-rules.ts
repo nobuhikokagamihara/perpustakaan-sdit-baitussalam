@@ -61,8 +61,8 @@ export const BACKUP_MODULES: BackupModuleDefinition[] = [
   },
   {
     id: 'schedules',
-    label: 'Jadwal Baca & Kelas SD',
-    description: 'Daftar kelas 1A–6B, siswa per kelas, jadwal literasi, log sesi, dan absensi baca.',
+    label: 'Jadwal Baca & Rombel Kelas SD',
+    description: 'Daftar seluruh rombel kelas SD, siswa per kelas, jadwal literasi, log sesi, dan absensi baca.',
     sqliteTables: [
       'school_classes',
       'class_students',
@@ -1396,4 +1396,313 @@ export function extractCirculationPolicy(
       s.policy_application_mode === 'apply_to_active' ? 'apply_to_active' : 'new_loans_only',
   };
 }
+
+// ============================================================================
+// Purge All Operational Data — Strict Backup-First Prerequisite Rules
+// ============================================================================
+
+export const PURGE_CONFIRMATION_PHRASE = 'HAPUS SEMUA DATA';
+export const PURGE_BACKUP_MAX_AGE_MINUTES = 30;
+const SHA256_HEX_REGEX = /^[a-f0-9]{64}$/i;
+
+/**
+ * Operational SQLite tables deleted during a full data wipe (child -> parent FK order).
+ * System tables (roles, permissions, role_permissions, membership_types, library_settings,
+ * backup_snapshots, audit_logs, and the currently signed-in super_admin user) are preserved
+ * so the administrator never gets locked out and can restore from the mandatory backup anytime.
+ */
+export const PURGEABLE_SQLITE_TABLES: readonly string[] = [
+  'reading_session_attendance',
+  'reading_schedule_logs',
+  'reading_schedules',
+  'class_students',
+  'school_classes',
+  'inventory_audit_items',
+  'inventory_audits',
+  'acquisition_items',
+  'acquisitions',
+  'suppliers',
+  'payments',
+  'fines',
+  'reservations',
+  'returns',
+  'loan_renewals',
+  'loan_items',
+  'loans',
+  'book_copies',
+  'book_categories',
+  'book_authors',
+  'books',
+  'shelves',
+  'locations',
+  'categories',
+  'publishers',
+  'authors',
+  'notifications',
+  'registration_requests',
+  'members',
+];
+
+/**
+ * Operational Firestore collections wiped during a full data purge.
+ * Preserves: library_settings, membership_types, staff_roles, backup_snapshots, audit_logs,
+ * and the currently signed-in Super Admin document in users.
+ */
+export const PURGEABLE_FIRESTORE_COLLECTIONS: readonly string[] = [
+  'reading_schedules',
+  'school_classes',
+  'public_classes',
+  'inventory_audits',
+  'acquisitions',
+  'suppliers',
+  'payments',
+  'fines',
+  'reservations',
+  'returns',
+  'loans',
+  'book_copies',
+  'books',
+  'public_catalog',
+  'shelves',
+  'locations',
+  'categories',
+  'notifications',
+  'registration_requests',
+  'members',
+];
+
+export const PRESERVED_SYSTEM_ITEMS: ReadonlyArray<{ title: string; detail: string }> = [
+  {
+    title: 'Akun Super Admin Aktif',
+    detail: 'Sesi dan akun Anda saat ini tetap dipertahankan agar tidak terkunci dari sistem.',
+  },
+  {
+    title: 'Riwayat Snapshot Backup',
+    detail: 'Seluruh snapshot cadangan (termasuk backup wajib pra-penghapusan) tetap tersimpan untuk pemulihan 1-klik.',
+  },
+  {
+    title: 'Pengaturan, Jenis Anggota & RBAC',
+    detail: 'Identitas sekolah, kebijakan peminjaman, serta peran & hak akses tetap utuh siap pakai.',
+  },
+  {
+    title: 'Jejak Audit Keamanan',
+    detail: 'Log audit bersifat permanen dan akan mencatat kode snapshot prasyarat penghapusan data.',
+  },
+];
+
+export interface PurgeSnapshotCandidate {
+  id: number | string;
+  snapshot_code: string;
+  label: string;
+  mode: string;
+  checksum: string;
+  total_records: number;
+  created_at: string;
+}
+
+export interface PurgeEligibilitySummary {
+  hasEligibleBackup: boolean;
+  maxAgeMinutes: number;
+  requiredPhrase: string;
+  eligibleSnapshot: {
+    id: number | string;
+    snapshot_code: string;
+    label: string;
+    checksum: string;
+    total_records: number;
+    created_at: string;
+    ageMinutes: number;
+    expiresInMinutes: number;
+  } | null;
+  operationalRecordCount: number;
+  reason: string;
+}
+
+/**
+ * Parses both ISO-8601 timestamps and SQLite UTC `YYYY-MM-DD HH:MM:SS` strings reliably.
+ */
+export function parseUtcTimestampMs(raw: string | null | undefined): number {
+  if (!raw || typeof raw !== 'string') return NaN;
+  const trimmed = raw.trim();
+  if (!trimmed) return NaN;
+  if (/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}(\.\d+)?$/.test(trimmed)) {
+    return Date.parse(trimmed.replace(' ', 'T') + 'Z');
+  }
+  return Date.parse(trimmed);
+}
+
+export function evaluatePurgeBackupPrerequisite(
+  snapshots: readonly PurgeSnapshotCandidate[],
+  operationalRecordCount: number,
+  nowIso?: string,
+  maxAgeMinutes: number = PURGE_BACKUP_MAX_AGE_MINUTES
+): PurgeEligibilitySummary {
+  const safeOpCount = Math.max(0, Math.floor(Number(operationalRecordCount) || 0));
+  const nowMs = nowIso ? parseUtcTimestampMs(nowIso) : Date.now();
+  const safeMaxAge = Math.max(1, Math.floor(maxAgeMinutes));
+
+  if (!Array.isArray(snapshots) || snapshots.length === 0) {
+    return {
+      hasEligibleBackup: false,
+      maxAgeMinutes: safeMaxAge,
+      requiredPhrase: PURGE_CONFIRMATION_PHRASE,
+      eligibleSnapshot: null,
+      operationalRecordCount: safeOpCount,
+      reason: `Belum ada snapshot cadangan penuh. Buat dan unduh backup penuh terbaru (maks. ${safeMaxAge} menit) sebelum menghapus data.`,
+    };
+  }
+
+  let newestFullAgeMinutes: number | null = null;
+  let foundPartialOnly = false;
+  let foundInvalidChecksum = false;
+
+  const sorted = [...snapshots].sort((a, b) => {
+    const am = parseUtcTimestampMs(a.created_at);
+    const bm = parseUtcTimestampMs(b.created_at);
+    return (Number.isFinite(bm) ? bm : 0) - (Number.isFinite(am) ? am : 0);
+  });
+
+  for (const snap of sorted) {
+    if (snap.mode !== 'full') {
+      foundPartialOnly = true;
+      continue;
+    }
+    if (!SHA256_HEX_REGEX.test(String(snap.checksum || '').trim())) {
+      foundInvalidChecksum = true;
+      continue;
+    }
+    const createdMs = parseUtcTimestampMs(snap.created_at);
+    if (!Number.isFinite(createdMs) || !Number.isFinite(nowMs)) {
+      continue;
+    }
+    // Allow up to 5 minutes of clock skew in either direction
+    const diffMs = nowMs - createdMs;
+    if (diffMs < -5 * 60_000) {
+      continue;
+    }
+    const ageMinutes = Math.max(0, Math.floor(diffMs / 60_000));
+    if (newestFullAgeMinutes === null) {
+      newestFullAgeMinutes = ageMinutes;
+    }
+    if (ageMinutes <= safeMaxAge) {
+      const expiresInMinutes = Math.max(1, safeMaxAge - ageMinutes);
+      return {
+        hasEligibleBackup: true,
+        maxAgeMinutes: safeMaxAge,
+        requiredPhrase: PURGE_CONFIRMATION_PHRASE,
+        eligibleSnapshot: {
+          id: snap.id,
+          snapshot_code: snap.snapshot_code,
+          label: snap.label,
+          checksum: snap.checksum,
+          total_records: Number(snap.total_records || 0),
+          created_at: snap.created_at,
+          ageMinutes,
+          expiresInMinutes,
+        },
+        operationalRecordCount: safeOpCount,
+        reason: `Syarat backup penuh terpenuhi oleh ${snap.snapshot_code} (berlaku ${expiresInMinutes} menit lagi).`,
+      };
+    }
+  }
+
+  if (newestFullAgeMinutes !== null) {
+    return {
+      hasEligibleBackup: false,
+      maxAgeMinutes: safeMaxAge,
+      requiredPhrase: PURGE_CONFIRMATION_PHRASE,
+      eligibleSnapshot: null,
+      operationalRecordCount: safeOpCount,
+      reason: `Backup penuh terakhir sudah berumur ${newestFullAgeMinutes} menit (melebihi batas ${safeMaxAge} menit). Buat backup penuh baru terlebih dahulu.`,
+    };
+  }
+
+  if (foundInvalidChecksum) {
+    return {
+      hasEligibleBackup: false,
+      maxAgeMinutes: safeMaxAge,
+      requiredPhrase: PURGE_CONFIRMATION_PHRASE,
+      eligibleSnapshot: null,
+      operationalRecordCount: safeOpCount,
+      reason: 'Checksum SHA-256 pada snapshot backup penuh tidak valid. Buat snapshot penuh baru yang terverifikasi.',
+    };
+  }
+
+  if (foundPartialOnly) {
+    return {
+      hasEligibleBackup: false,
+      maxAgeMinutes: safeMaxAge,
+      requiredPhrase: PURGE_CONFIRMATION_PHRASE,
+      eligibleSnapshot: null,
+      operationalRecordCount: safeOpCount,
+      reason: 'Hanya tersedia backup selektif/parsial. Penghapusan seluruh data wajib didahului backup PENUH (seluruh modul utama).',
+    };
+  }
+
+  return {
+    hasEligibleBackup: false,
+    maxAgeMinutes: safeMaxAge,
+    requiredPhrase: PURGE_CONFIRMATION_PHRASE,
+    eligibleSnapshot: null,
+    operationalRecordCount: safeOpCount,
+    reason: `Buat backup penuh terverifikasi (maks. ${safeMaxAge} menit) sebelum menghapus seluruh data operasional.`,
+  };
+}
+
+export function validatePurgeAllDataRequest(params: {
+  actorRoleSlug: string;
+  confirmationPhrase: string;
+  acknowledgeIrreversible: boolean;
+  prerequisiteSnapshot: PurgeSnapshotCandidate | null;
+  nowIso?: string;
+  maxAgeMinutes?: number;
+}): { ok: boolean; reason?: string; ageMinutes?: number } {
+  if (params.actorRoleSlug !== 'super_admin') {
+    return {
+      ok: false,
+      reason: 'Hanya Super Admin yang diizinkan menghapus seluruh data operasional perpustakaan.',
+    };
+  }
+
+  const maxAge = Math.max(1, Math.floor(params.maxAgeMinutes ?? PURGE_BACKUP_MAX_AGE_MINUTES));
+  if (!params.prerequisiteSnapshot) {
+    return {
+      ok: false,
+      reason: `Penghapusan ditolak: Anda wajib membuat backup penuh terlebih dahulu (maks. ${maxAge} menit sebelum penghapusan).`,
+    };
+  }
+
+  const snapCheck = evaluatePurgeBackupPrerequisite(
+    [params.prerequisiteSnapshot],
+    0,
+    params.nowIso,
+    maxAge
+  );
+  if (!snapCheck.hasEligibleBackup || !snapCheck.eligibleSnapshot) {
+    return {
+      ok: false,
+      reason: snapCheck.reason,
+    };
+  }
+
+  if (!params.acknowledgeIrreversible) {
+    return {
+      ok: false,
+      reason: 'Centang pernyataan persetujuan bahwa seluruh data operasional akan dihapus permanen.',
+    };
+  }
+
+  if (String(params.confirmationPhrase || '').trim() !== PURGE_CONFIRMATION_PHRASE) {
+    return {
+      ok: false,
+      reason: `Ketik frasa konfirmasi persis "${PURGE_CONFIRMATION_PHRASE}" (huruf kapital) untuk melanjutkan.`,
+    };
+  }
+
+  return {
+    ok: true,
+    ageMinutes: snapCheck.eligibleSnapshot.ageMinutes,
+  };
+}
+
 

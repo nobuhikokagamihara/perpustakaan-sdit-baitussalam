@@ -2,10 +2,13 @@
 
 import React, { useMemo, useState } from 'react';
 import {
+  AlertTriangle,
   CheckCircle2,
   Clock,
   Edit3,
   KeyRound,
+  Scale,
+  School,
   Shield,
   UserCheck,
   UserPlus,
@@ -23,11 +26,20 @@ import {
   TextField,
 } from '@/components/ui/DesignPrimitives';
 import { gatewayFetch } from '@/lib/client/data-gateway';
-import type { RoleRow, UserRow } from './types';
+import { canRoleApproveRegistrations } from '@/lib/domain/signup-rules';
+import { RegistrationReviewModal } from './RegistrationReviewModal';
+import type {
+  RegistrationRequestRow,
+  RoleRow,
+  SchoolClassSummaryRow,
+  UserRow,
+} from './types';
 
 interface UsersManagementTabProps {
   users: UserRow[];
   roles: RoleRow[];
+  registrationRequests?: RegistrationRequestRow[];
+  schoolClasses?: SchoolClassSummaryRow[];
   currentUserId?: number;
   currentUserRoleSlug?: string;
   isFirebaseMode: boolean;
@@ -39,6 +51,8 @@ interface UsersManagementTabProps {
 export function UsersManagementTab({
   users,
   roles,
+  registrationRequests = [],
+  schoolClasses = [],
   currentUserId,
   currentUserRoleSlug,
   isFirebaseMode,
@@ -47,13 +61,20 @@ export function UsersManagementTab({
   notify,
 }: UsersManagementTabProps) {
   const isSuperAdmin = currentUserRoleSlug === 'super_admin';
+  const canApproveRegistrations = canRoleApproveRegistrations(currentUserRoleSlug);
+
   const [search, setSearch] = useState('');
   const [roleFilter, setRoleFilter] = useState('all');
   const [statusFilter, setStatusFilter] = useState<
     'all' | 'active' | 'pending' | 'rejected' | 'inactive'
   >('all');
 
-  // Pending approvals role override map
+  // Pending approvals state
+  const [reviewTarget, setReviewTarget] = useState<RegistrationRequestRow | null>(null);
+  const [reviewBusy, setReviewBusy] = useState(false);
+  const [showRequestHistory, setShowRequestHistory] = useState(false);
+
+  // Legacy pending users override map
   const [approvalRoleByKey, setApprovalRoleByKey] = useState<Record<string, string>>({});
   const [approvalBusyKey, setApprovalBusyKey] = useState<string | null>(null);
 
@@ -65,6 +86,8 @@ export function UsersManagementTab({
     email: '',
     password: '',
     roleId: String(roles.find((r) => r.slug === 'pustakawan')?.id || roles[0]?.id || 3),
+    assignedClass: '',
+    syncToClass: false,
   });
 
   const [editTarget, setEditTarget] = useState<UserRow | null>(null);
@@ -88,6 +111,16 @@ export function UsersManagementTab({
     return Array.from(groups.entries());
   }, [roles]);
 
+  const pendingRequests = useMemo(
+    () => registrationRequests.filter((r) => r.status === 'pending'),
+    [registrationRequests]
+  );
+
+  const resolvedRequests = useMemo(
+    () => registrationRequests.filter((r) => r.status !== 'pending').slice(0, 15),
+    [registrationRequests]
+  );
+
   const pendingUsers = useMemo(
     () => users.filter((u) => u.approval_status === 'pending'),
     [users]
@@ -101,22 +134,114 @@ export function UsersManagementTab({
       if (statusFilter === 'pending' && appStatus !== 'pending') return false;
       if (statusFilter === 'rejected' && appStatus !== 'rejected') return false;
       if (statusFilter === 'active' && (!u.is_active || appStatus !== 'approved')) return false;
-      if (statusFilter === 'inactive' && (u.is_active || appStatus === 'pending' || appStatus === 'rejected'))
+      if (
+        statusFilter === 'inactive' &&
+        (u.is_active || appStatus === 'pending' || appStatus === 'rejected')
+      )
         return false;
       if (!q) return true;
       return (
         u.full_name.toLowerCase().includes(q) ||
         u.username.toLowerCase().includes(q) ||
         u.email.toLowerCase().includes(q) ||
-        u.role_name.toLowerCase().includes(q)
+        u.role_name.toLowerCase().includes(q) ||
+        (u.assigned_class || '').toLowerCase().includes(q)
       );
     });
   }, [users, search, roleFilter, statusFilter]);
+
+  const selectedCreateRole = useMemo(
+    () => roles.find((r) => String(r.id) === createForm.roleId),
+    [roles, createForm.roleId]
+  );
+
+  const createNeedsClass =
+    selectedCreateRole &&
+    ['siswa', 'duta_literasi', 'wali_kelas', 'guru_pendamping'].includes(selectedCreateRole.slug);
+  const createIsClassTeacher =
+    selectedCreateRole &&
+    ['wali_kelas', 'guru_pendamping'].includes(selectedCreateRole.slug);
 
   const renderUserStatus = (u: UserRow) => {
     if (u.approval_status === 'pending') return 'Menunggu Persetujuan';
     if (u.approval_status === 'rejected') return 'Ditolak';
     return u.is_active ? 'Aktif' : 'Nonaktif';
+  };
+
+  const handleApproveRegistration = async (opts: {
+    request: RegistrationRequestRow;
+    roleId: number;
+    roleSlug: string;
+    applyClassTeacherSync: boolean;
+    syncSchedules: boolean;
+    applyLeadershipSync: boolean;
+    note: string;
+  }) => {
+    setReviewBusy(true);
+    try {
+      const res = await gatewayFetch('/api/settings', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          section: 'approve_registration',
+          requestId: opts.request.id,
+          docId: opts.request.docId,
+          requesterUid: opts.request.requesterUid,
+          roleId: opts.roleId,
+          roleSlug: opts.roleSlug,
+          applyClassTeacherSync: opts.applyClassTeacherSync,
+          syncSchedules: opts.syncSchedules,
+          applyLeadershipSync: opts.applyLeadershipSync,
+          note: opts.note,
+        }),
+      });
+      const json = await res.json();
+      if (!res.ok) throw new Error(json.error || 'Gagal menyetujui pendaftaran.');
+      const syncMsg = opts.applyClassTeacherSync
+        ? ` Data kelas ${opts.request.assignedClass}${opts.syncSchedules ? ' & jadwal baca' : ''} diperbarui.`
+        : opts.request.hasConflict && opts.request.assignedClass
+          ? ` Data kelas ${opts.request.assignedClass} eksisting tetap dipertahankan.`
+          : '';
+      notify(`Pendaftaran "${opts.request.fullName}" disetujui dan akun berhasil dibuat.${syncMsg}`, 'success');
+      setReviewTarget(null);
+      await onSaved();
+    } catch (err) {
+      notify(err instanceof Error ? err.message : 'Gagal menyetujui pendaftaran.', 'error');
+    } finally {
+      setReviewBusy(false);
+    }
+  };
+
+  const handleRejectRegistration = async (opts: {
+    request: RegistrationRequestRow;
+    note: string;
+  }) => {
+    setReviewBusy(true);
+    try {
+      const res = await gatewayFetch('/api/settings', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          section: 'reject_registration',
+          requestId: opts.request.id,
+          docId: opts.request.docId,
+          requesterUid: opts.request.requesterUid,
+          note: opts.note,
+        }),
+      });
+      const json = await res.json();
+      if (!res.ok) throw new Error(json.error || 'Gagal menolak pendaftaran.');
+      notify(
+        `Pendaftaran "${opts.request.fullName}" (${opts.request.requestCode}) ditolak. Akun tidak disimpan dan data kelas tidak diubah.`,
+        'info'
+      );
+      setReviewTarget(null);
+      await onSaved();
+    } catch (err) {
+      notify(err instanceof Error ? err.message : 'Gagal menolak pendaftaran.', 'error');
+    } finally {
+      setReviewBusy(false);
+    }
   };
 
   const handleCreateUser = async (e: React.FormEvent) => {
@@ -133,6 +258,8 @@ export function UsersManagementTab({
           email: createForm.email,
           password: createForm.password,
           roleId: Number(createForm.roleId),
+          assignedClass: createForm.assignedClass,
+          syncToClass: createForm.syncToClass,
         }),
       });
       const json = await res.json();
@@ -145,6 +272,8 @@ export function UsersManagementTab({
         email: '',
         password: '',
         roleId: String(roles.find((r) => r.slug === 'pustakawan')?.id || 3),
+        assignedClass: '',
+        syncToClass: false,
       });
       await onSaved();
     } catch (err) {
@@ -261,7 +390,7 @@ export function UsersManagementTab({
           section: 'reject_user',
           userId: u.id,
           uid: u.uid,
-          note: 'Ditolak oleh Super Admin',
+          note: 'Ditolak oleh peninjau',
         }),
       });
       const json = await res.json();
@@ -339,19 +468,163 @@ export function UsersManagementTab({
 
   return (
     <div className="space-y-4">
-      {/* Pending Approval Queue for Super Admin */}
+      {/* Pending Registration & Conflict Resolution Queue (Super Admin / Admin Perpus / Kepala Perpus) */}
+      {(pendingRequests.length > 0 || resolvedRequests.length > 0) && (
+        <div className="rounded-xl border border-amber-200 bg-amber-50/75 p-4 space-y-3">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div className="flex items-center gap-2">
+              <Scale className="h-4 w-4 text-amber-800" />
+              <h3 className="font-serif text-sm font-semibold text-amber-950">
+                Antrean Persetujuan &amp; Resolusi Konflik Akun ({pendingRequests.length} Pending)
+              </h3>
+            </div>
+            <div className="flex items-center gap-2">
+              <span className="text-[11px] text-amber-900">
+                Wewenang: Super Admin, Admin Perpustakaan &amp; Kepala Perpustakaan
+              </span>
+              {resolvedRequests.length > 0 && (
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="secondary"
+                  onClick={() => setShowRequestHistory((v) => !v)}
+                >
+                  {showRequestHistory
+                    ? 'Sembunyikan Riwayat'
+                    : `Riwayat Keputusan (${resolvedRequests.length})`}
+                </Button>
+              )}
+            </div>
+          </div>
+
+          {pendingRequests.length === 0 ? (
+            <div className="rounded-lg border border-amber-200/80 bg-white px-4 py-3 text-xs text-[#5C5E64]">
+              Tidak ada permintaan pendaftaran yang menunggu persetujuan saat ini.
+            </div>
+          ) : (
+            <div className="divide-y divide-amber-200/80 rounded-lg border border-amber-200 bg-white">
+              {pendingRequests.map((req) => (
+                <div
+                  key={req.docId || req.id}
+                  className="flex flex-col gap-3 px-4 py-3.5 text-xs sm:flex-row sm:items-center sm:justify-between"
+                >
+                  <div className="min-w-0 space-y-1">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <span className="font-semibold text-[#1E2433]">{req.fullName}</span>
+                      <span className="font-mono text-[11px] text-[#5C5E64]">
+                        {req.requestCode}
+                      </span>
+                      {req.hasConflict ? (
+                        <span className="inline-flex items-center gap-1 rounded-md border border-amber-300 bg-amber-100 px-2 py-0.5 text-[10px] font-semibold text-amber-950">
+                          <AlertTriangle className="h-3 w-3" />
+                          Konflik Data
+                        </span>
+                      ) : (
+                        <span className="inline-flex items-center gap-1 rounded-md border border-sky-200 bg-sky-50 px-2 py-0.5 text-[10px] font-semibold text-sky-900">
+                          <Clock className="h-3 w-3" />
+                          Menunggu Verifikasi
+                        </span>
+                      )}
+                    </div>
+                    <p className="text-[11px] text-[#5C5E64]">
+                      <span className="font-mono">@{req.username}</span> · {req.email}
+                    </p>
+                    <div className="flex flex-wrap items-center gap-x-3 gap-y-0.5 text-[11px]">
+                      <span className="text-[#1E2433]">
+                        Peran: <strong>{req.requestedRoleName}</strong>
+                      </span>
+                      {req.assignedClass && (
+                        <span className="inline-flex items-center gap-1 text-[#1E2433]">
+                          <School className="h-3 w-3 text-[#E56B63]" />
+                          <strong>{req.assignedClass}</strong>
+                        </span>
+                      )}
+                      {req.conflictExistingValue && (
+                        <span className="text-amber-800">
+                          Saat ini: <strong>{req.conflictExistingValue}</strong>
+                        </span>
+                      )}
+                    </div>
+                    {req.conflictSummary && (
+                      <p className="text-[11px] text-amber-900/90 leading-relaxed">
+                        {req.conflictSummary}
+                      </p>
+                    )}
+                  </div>
+
+                  {canApproveRegistrations && (
+                    <div className="flex shrink-0 items-center gap-2">
+                      <Button
+                        type="button"
+                        size="sm"
+                        onClick={() => setReviewTarget(req)}
+                      >
+                        <Scale className="h-3.5 w-3.5" />
+                        Tinjau &amp; Putuskan
+                      </Button>
+                    </div>
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
+
+          {showRequestHistory && resolvedRequests.length > 0 && (
+            <div className="rounded-lg border border-[#E2DFD7] bg-white overflow-x-auto">
+              <table className="w-full text-left text-[11px]">
+                <thead>
+                  <tr className="border-b border-[#E7E4DC] bg-[#F4F3EE] text-[10px] uppercase tracking-wider text-[#5C5E64]">
+                    <th className="px-3 py-2">Kode</th>
+                    <th className="px-3 py-2">Pendaftar</th>
+                    <th className="px-3 py-2">Peran / Kelas</th>
+                    <th className="px-3 py-2">Keputusan</th>
+                    <th className="px-3 py-2">Peninjau</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-[#ECE9E1]">
+                  {resolvedRequests.map((r) => (
+                    <tr key={`hist-${r.docId || r.id}`}>
+                      <td className="px-3 py-2 font-mono text-[#1E2433]">{r.requestCode}</td>
+                      <td className="px-3 py-2">
+                        <div className="font-medium text-[#1E2433]">{r.fullName}</div>
+                        <div className="text-[#7B7D82]">{r.email}</div>
+                      </td>
+                      <td className="px-3 py-2">
+                        <div>{r.requestedRoleName}</div>
+                        {r.assignedClass && (
+                          <div className="text-[#7B7D82]">{r.assignedClass}</div>
+                        )}
+                      </td>
+                      <td className="px-3 py-2">
+                        <StatusIndicator
+                          status={r.status === 'approved' ? 'Aktif' : 'Ditolak'}
+                        />
+                        {r.decisionNote && (
+                          <p className="mt-0.5 text-[10px] text-[#5C5E64]">{r.decisionNote}</p>
+                        )}
+                      </td>
+                      <td className="px-3 py-2 text-[#5C5E64]">
+                        {r.reviewedByName || 'Pengelola'}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Legacy Pending Approval Queue */}
       {pendingUsers.length > 0 && (
         <div className="rounded-xl border border-amber-200 bg-amber-50/75 p-4 space-y-3">
           <div className="flex flex-wrap items-center justify-between gap-2">
             <div className="flex items-center gap-2">
               <Clock className="h-4 w-4 text-amber-700" />
               <h3 className="font-serif text-sm font-semibold text-amber-950">
-                Permintaan Persetujuan Akun Baru ({pendingUsers.length})
+                Akun Menunggu Aktivasi ({pendingUsers.length})
               </h3>
             </div>
-            <span className="text-[11px] text-amber-900">
-              Pendaftar peran Admin / Kepala Perpus / Kepala Sekolah / Staf memerlukan persetujuan Super Admin.
-            </span>
           </div>
 
           <div className="divide-y divide-amber-200/80 rounded-lg border border-amber-200 bg-white">
@@ -375,7 +648,7 @@ export function UsersManagementTab({
                     </p>
                   </div>
 
-                  {isSuperAdmin && canWrite && (
+                  {canApproveRegistrations && (
                     <div className="flex flex-wrap items-center gap-2">
                       <select
                         aria-label={`Pilih peran persetujuan untuk ${u.full_name}`}
@@ -419,7 +692,7 @@ export function UsersManagementTab({
           <SearchField
             value={search}
             onChange={setSearch}
-            placeholder="Cari nama, username, email..."
+            placeholder="Cari nama, username, email, kelas..."
             ariaLabel="Cari akun pengguna"
             className="w-64"
           />
@@ -500,6 +773,11 @@ export function UsersManagementTab({
                           </span>
                         )}
                       </div>
+                      {u.assigned_class && (
+                        <div className="mt-0.5 text-[11px] text-[#5C5E64]">
+                          Kelas: <strong>{u.assigned_class}</strong>
+                        </div>
+                      )}
                     </td>
                     <td className="px-4 py-3">
                       <div className="font-mono text-[#1E2433]">@{u.username}</div>
@@ -515,7 +793,7 @@ export function UsersManagementTab({
                     <td className="px-4 py-3">
                       {canWrite && (
                         <div className="flex flex-wrap items-center justify-end gap-1.5">
-                          {isSuperAdmin && isPending && (
+                          {canApproveRegistrations && isPending && (
                             <Button
                               size="sm"
                               onClick={() => handleApproveUser(u)}
@@ -604,11 +882,23 @@ export function UsersManagementTab({
         <div className="flex items-center gap-2.5 rounded-xl border border-[#E7E4DC] bg-[#FAF9F5] px-4 py-3 text-xs text-[#5C5E64]">
           <Users className="h-4 w-4 shrink-0 text-[#222B3A]" />
           <span>
-            Pada mode Cloud Firebase, Super Admin dapat langsung mengubah peran atau menyetujui akun
-            di tabel ini maupun melalui tab <strong>RBAC &amp; Peran → Staf Google Auth</strong>.
+            Pada mode Cloud Firebase, antrean pendaftaran berstatus <strong>Pending</strong>{' '}
+            tersimpan di koleksi Firestore <code className="font-mono">registration_requests</code>{' '}
+            dan dapat diputuskan oleh Super Admin, Admin Perpustakaan, maupun Kepala Perpustakaan.
           </span>
         </div>
       )}
+
+      {/* Modal: Registration Conflict Review */}
+      <RegistrationReviewModal
+        request={reviewTarget}
+        roles={roles}
+        currentUserRoleSlug={currentUserRoleSlug}
+        busy={reviewBusy}
+        onClose={() => setReviewTarget(null)}
+        onApprove={handleApproveRegistration}
+        onReject={handleRejectRegistration}
+      />
 
       {/* Modal: Create User */}
       <Modal
@@ -650,11 +940,53 @@ export function UsersManagementTab({
             <SelectField
               label="Peran RBAC"
               value={createForm.roleId}
-              onChange={(e) => setCreateForm((f) => ({ ...f, roleId: e.target.value }))}
+              onChange={(e) =>
+                setCreateForm((f) => ({
+                  ...f,
+                  roleId: e.target.value,
+                  assignedClass: '',
+                  syncToClass: false,
+                }))
+              }
               className="sm:col-span-2"
             >
               {renderRoleOptions()}
             </SelectField>
+
+            {createNeedsClass && schoolClasses.length > 0 && (
+              <SelectField
+                label="Pilih Kelas Rombel"
+                value={createForm.assignedClass}
+                onChange={(e) =>
+                  setCreateForm((f) => ({ ...f, assignedClass: e.target.value }))
+                }
+                className="sm:col-span-2"
+              >
+                <option value="">-- Pilih Kelas --</option>
+                {schoolClasses.map((c) => (
+                  <option key={c.className} value={c.className}>
+                    {c.className}
+                    {createIsClassTeacher
+                      ? ` — Wali: ${c.homeroomTeacher || 'Kosong'} | Pendamping: ${c.companionTeacher || 'Kosong'}`
+                      : ''}
+                  </option>
+                ))}
+              </SelectField>
+            )}
+
+            {createIsClassTeacher && createForm.assignedClass && (
+              <label className="sm:col-span-2 flex items-center gap-2 text-xs text-[#1E2433] cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={createForm.syncToClass}
+                  onChange={(e) =>
+                    setCreateForm((f) => ({ ...f, syncToClass: e.target.checked }))
+                  }
+                  className="accent-[#222B3A]"
+                />
+                Langsung sinkronkan nama ini ke data {createForm.assignedClass} &amp; jadwal baca aktif
+              </label>
+            )}
           </div>
           <div className="flex justify-end gap-2 border-t border-[#E7E4DC] pt-4">
             <Button type="button" variant="secondary" onClick={() => setCreateOpen(false)}>

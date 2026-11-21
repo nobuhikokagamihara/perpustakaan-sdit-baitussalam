@@ -1103,7 +1103,13 @@ export function seedReadingSchedules(db: Database.Database): void {
       }
     }
 
-    // 2. Seed all 12 SD class reading schedules idempotently
+    // 2. Skip demo seeding if Super Admin intentionally purged operational data
+    const purgedFlag = db
+      .prepare("SELECT value FROM library_settings WHERE key = 'data_purged_at'")
+      .get() as { value?: string } | undefined;
+    if (purgedFlag?.value && purgedFlag.value.trim().length > 0) return;
+
+    // 3. Seed all 12 SD class reading schedules idempotently
     const existingCount = (
       db.prepare('SELECT COUNT(*) as c FROM reading_schedules').get() as { c: number }
     ).c;
@@ -1418,6 +1424,11 @@ export function seedReadingSchedules(db: Database.Database): void {
 }
 
 export function seedClassRostersAndAttendance(db: Database.Database): void {
+  const purgedFlag = db
+    .prepare("SELECT value FROM library_settings WHERE key = 'data_purged_at'")
+    .get() as { value?: string } | undefined;
+  if (purgedFlag?.value && purgedFlag.value.trim().length > 0) return;
+
   db.transaction(() => {
     // 1. Seed all 12 SD classes with Wali Kelas + Guru Pendamping idempotently
     const insertClass = db.prepare(`

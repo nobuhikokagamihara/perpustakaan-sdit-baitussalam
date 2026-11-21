@@ -6,13 +6,16 @@ import { logAudit } from '@/lib/db/audit';
 import {
   ALL_BACKUP_TABLES,
   BACKUP_MODULES,
+  PURGEABLE_SQLITE_TABLES,
   type BackupModuleId,
   buildBackupEnvelope,
   computeRestoreDiff,
   evaluateBackupHealth,
+  evaluatePurgeBackupPrerequisite,
   normalizeSelectedModules,
   resolveTablesForModules,
   validateBackupEnvelope,
+  validatePurgeAllDataRequest,
 } from '@/lib/domain/settings-backup-rules';
 
 const ALLOWED_TABLE_SET = new Set(ALL_BACKUP_TABLES);
@@ -220,6 +223,20 @@ function getBackupMeta(db: Database.Database) {
   const lastSnapshotAt = snapshots[0]?.created_at || null;
   const health = evaluateBackupHealth(lastSnapshotAt, policy.backup_auto_frequency);
 
+  let operationalRecordCount = 0;
+  for (const tbl of PURGEABLE_SQLITE_TABLES) {
+    try {
+      const row = db.prepare(`SELECT COUNT(*) as c FROM ${tbl}`).get() as { c: number };
+      operationalRecordCount += Number(row?.c || 0);
+    } catch {
+      // ignore missing optional table
+    }
+  }
+  const otherUsersCount = Math.max(0, Number(tableCounts.users || 0) - 1);
+  operationalRecordCount += otherUsersCount;
+
+  const purgeEligibility = evaluatePurgeBackupPrerequisite(snapshots, operationalRecordCount);
+
   return {
     sourceEngine: 'sqlite',
     totalTables,
@@ -229,6 +246,7 @@ function getBackupMeta(db: Database.Database) {
     snapshots,
     policy,
     health,
+    purgeEligibility,
   };
 }
 
@@ -412,6 +430,163 @@ export async function POST(req: NextRequest) {
     });
   }
 
+  // 1b. Purge All Operational Data (Strict Super Admin + Verified Fresh Full Backup Prerequisite)
+  if (action === 'purge_all_data') {
+    if (auth.roleSlug !== 'super_admin') {
+      return NextResponse.json(
+        { error: 'Hanya Super Admin yang berwenang menghapus seluruh data operasional.' },
+        { status: 403 }
+      );
+    }
+
+    const requestedSnapId = Number(body.prerequisiteSnapshotId || 0);
+    const snapRow = requestedSnapId
+      ? (db
+          .prepare(
+            `SELECT id, snapshot_code, label, mode, checksum, total_records, payload_json, created_at
+             FROM backup_snapshots WHERE id = ?`
+          )
+          .get(requestedSnapId) as
+          | {
+              id: number;
+              snapshot_code: string;
+              label: string;
+              mode: string;
+              checksum: string;
+              total_records: number;
+              payload_json: string;
+              created_at: string;
+            }
+          | undefined)
+      : (db
+          .prepare(
+            `SELECT id, snapshot_code, label, mode, checksum, total_records, payload_json, created_at
+             FROM backup_snapshots
+             WHERE mode = 'full'
+             ORDER BY created_at DESC, id DESC
+             LIMIT 1`
+          )
+          .get() as
+          | {
+              id: number;
+              snapshot_code: string;
+              label: string;
+              mode: string;
+              checksum: string;
+              total_records: number;
+              payload_json: string;
+              created_at: string;
+            }
+          | undefined);
+
+    // Server-side integrity check of stored snapshot payload before accepting it as prerequisite
+    let verifiedCandidate = snapRow
+      ? {
+          id: snapRow.id,
+          snapshot_code: snapRow.snapshot_code,
+          label: snapRow.label,
+          mode: snapRow.mode,
+          checksum: snapRow.checksum,
+          total_records: snapRow.total_records,
+          created_at: snapRow.created_at,
+        }
+      : null;
+
+    if (snapRow) {
+      try {
+        const parsedSnap = JSON.parse(snapRow.payload_json) as unknown;
+        const envelopeCheck = validateBackupEnvelope(parsedSnap);
+        if (!envelopeCheck.ok || envelopeCheck.checksumStatus !== 'verified' || envelopeCheck.mode !== 'full') {
+          return NextResponse.json(
+            {
+              error:
+                'Verifikasi integritas SHA-256 pada snapshot prasyarat gagal atau bukan backup penuh. Buat backup penuh baru terlebih dahulu.',
+            },
+            { status: 400 }
+          );
+        }
+      } catch {
+        verifiedCandidate = null;
+      }
+    }
+
+    const purgeCheck = validatePurgeAllDataRequest({
+      actorRoleSlug: auth.roleSlug,
+      confirmationPhrase: String(body.confirmationPhrase || ''),
+      acknowledgeIrreversible: Boolean(body.acknowledgeIrreversible),
+      prerequisiteSnapshot: verifiedCandidate,
+    });
+
+    if (!purgeCheck.ok || !snapRow) {
+      return NextResponse.json(
+        { error: purgeCheck.reason || 'Persyaratan penghapusan seluruh data belum terpenuhi.' },
+        { status: 400 }
+      );
+    }
+
+    const purgedAt = new Date().toISOString();
+    const deletedByTable: Record<string, number> = {};
+    let deletedRowsTotal = 0;
+
+    db.pragma('foreign_keys = OFF');
+    try {
+      db.transaction(() => {
+        for (const tbl of PURGEABLE_SQLITE_TABLES) {
+          try {
+            const res = db.prepare(`DELETE FROM ${tbl}`).run();
+            deletedByTable[tbl] = Number(res.changes || 0);
+            deletedRowsTotal += Number(res.changes || 0);
+          } catch {
+            deletedByTable[tbl] = 0;
+          }
+        }
+
+        // Preserve active Super Admin account so admin cannot be locked out
+        const delUsers = db.prepare('DELETE FROM users WHERE id != ?').run(auth.id);
+        deletedByTable.users = Number(delUsers.changes || 0);
+        deletedRowsTotal += Number(delUsers.changes || 0);
+
+        // Mark database as intentionally purged so demo seeders do not repopulate on restart
+        db.prepare(
+          `INSERT INTO library_settings (key, value, updated_at)
+           VALUES ('data_purged_at', ?, datetime('now'))
+           ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = datetime('now')`
+        ).run(purgedAt);
+
+        logAudit(db, {
+          userId: auth.id,
+          userName: auth.fullName,
+          action: 'DATABASE_PURGE_ALL',
+          entityType: 'backup',
+          entityId: snapRow.snapshot_code,
+          after: {
+            prerequisiteSnapshotId: snapRow.id,
+            prerequisiteSnapshotCode: snapRow.snapshot_code,
+            prerequisiteChecksum: snapRow.checksum,
+            deletedRowsTotal,
+            deletedTablesCount: Object.keys(deletedByTable).length,
+            deletedByTable,
+            preservedUserId: auth.id,
+            purgedAt,
+          },
+        });
+      })();
+    } finally {
+      db.pragma('foreign_keys = ON');
+    }
+
+    return NextResponse.json({
+      ok: true,
+      purgedAt,
+      deletedRowsTotal,
+      deletedTables: Object.keys(deletedByTable).length,
+      deletedByTable,
+      prerequisiteSnapshotId: snapRow.id,
+      prerequisiteSnapshotCode: snapRow.snapshot_code,
+      preservedUserId: auth.id,
+    });
+  }
+
   // Load backup payload either from uploaded JSON or from saved snapshotId
   let backupPayload: Record<string, unknown> | null = null;
   let sourceLabel = 'Unggahan JSON';
@@ -560,6 +735,9 @@ export async function POST(req: NextRequest) {
             restoredRowsTotal++;
           }
         }
+
+        // Clear explicit purge marker after successful restore
+        db.prepare("DELETE FROM library_settings WHERE key = 'data_purged_at'").run();
 
         logAudit(db, {
           userId: auth.id,

@@ -4,6 +4,7 @@ import React, { createContext, useCallback, useContext, useEffect, useRef, useSt
 import { onAuthStateChanged, signInWithPopup, signOut, type User as FirebaseUser } from 'firebase/auth';
 import {
   collection,
+  deleteDoc,
   doc,
   getDoc,
   getDocs,
@@ -27,7 +28,6 @@ import {
   sanitizeDocId,
   testConnection,
 } from '@/lib/firebase/client';
-import { ensureFirestoreSeeded, ROLE_PERMISSION_DEFAULTS } from '@/lib/firebase/firestore-seed';
 import {
   getLocalAuthHeaders,
   markGatewayAuthReady,
@@ -42,6 +42,22 @@ import {
   extractLibraryIdentity,
   type LibraryIdentity,
 } from '@/lib/domain/settings-backup-rules';
+import {
+  buildRegistrationRequestCode,
+  buildUnitOrClassLabel,
+  detectClassTeacherConflict,
+  detectLibraryLeadershipConflict,
+  resolveMembershipTypeCodeForSignup,
+} from '@/lib/domain/signup-rules';
+
+const ROLE_PERMISSION_DEFAULTS: Record<string, string[]> = Object.fromEntries(
+  SCHOOL_ROLE_CATALOG.map((r) => [r.slug, r.permissions])
+);
+
+function classNameToDocId(className: string): string {
+  const short = className.replace(/^Kelas\s+/i, '').trim().toLowerCase().replace(/[^a-z0-9]/g, '');
+  return `class_${short || '1a'}`;
+}
 
 export type { LibraryIdentity };
 
@@ -53,11 +69,39 @@ export interface SessionUser {
   fullName: string;
   roleSlug: string;
   roleName: string;
+  assignedClass?: string;
   memberId: number | null;
   memberDocId?: string | null;
   permissions: string[];
   approvalStatus?: 'approved' | 'pending' | 'rejected';
   requestedRoleSlug?: string | null;
+}
+
+export interface PendingRegistrationInfo {
+  requestId?: string | number;
+  requestCode: string;
+  email: string;
+  fullName: string;
+  requestedRoleSlug: string;
+  requestedRoleName: string;
+  assignedClass: string;
+  hasConflict: boolean;
+  conflictType: string;
+  conflictExistingValue: string;
+  conflictSummary: string;
+  status: 'pending' | 'rejected' | 'approved';
+  decisionNote?: string;
+  source: 'firestore' | 'local';
+}
+
+export interface GoogleSignupContext {
+  roleSlug?: string;
+  fullName?: string;
+  assignedClass?: string;
+  identityNumber?: string;
+  gender?: string;
+  phone?: string;
+  extraMeta?: Record<string, string>;
 }
 
 export interface SignupPayload {
@@ -66,27 +110,50 @@ export interface SignupPayload {
   username?: string;
   password: string;
   roleSlug: string;
+  assignedClass?: string;
   unitOrClass?: string;
   identityNumber?: string;
+  gender?: string;
+  phone?: string;
+  extraMeta?: Record<string, string>;
 }
 
 export interface SignupResult {
   pendingApproval: boolean;
   message: string;
-  user: SessionUser;
+  requestCode?: string;
+  hasConflict?: boolean;
+  syncSummary?: string;
+  conflictInfo?: {
+    conflictType: string | null;
+    assignedClass: string;
+    existingValue: string;
+    summary: string;
+  } | null;
+  user?: SessionUser;
+}
+
+export interface GoogleLoginResult {
+  pendingApproval: boolean;
+  message?: string;
+  syncSummary?: string;
+  pendingRegistration?: PendingRegistrationInfo | null;
+  user?: SessionUser | null;
 }
 
 interface AuthContextValue {
   user: SessionUser | null;
+  pendingRegistration: PendingRegistrationInfo | null;
   library: LibraryIdentity;
   unreadNotifications: number;
   loading: boolean;
   authMode: 'firebase' | 'local';
   isFirebaseSession: boolean;
   refreshSession: () => Promise<void>;
+  clearPendingRegistration: () => void;
   loginWithCredentials: (identifier: string, password: string) => Promise<SessionUser>;
   signupWithCredentials: (payload: SignupPayload) => Promise<SignupResult>;
-  loginWithGoogle: (requestedRoleSlug?: string) => Promise<SessionUser>;
+  loginWithGoogle: (signupContext?: string | GoogleSignupContext) => Promise<GoogleLoginResult>;
   logout: (redirectTo?: string) => Promise<void>;
   can: (permission: string) => boolean;
 }
@@ -113,20 +180,52 @@ function isStaffRoleSlug(slug: string): boolean {
   ].includes(slug);
 }
 
+const ALLOWED_SELF_SIGNUP_ROLES = new Set([
+  'anggota',
+  'siswa',
+  'duta_literasi',
+  'wali_kelas',
+  'guru_pendamping',
+  'guru_mapel',
+  'guru_bk',
+  'komite_sekolah',
+  'petugas_kebersihan_keamanan',
+  'pengunjung',
+]);
+
 async function resolveFirebaseSession(
   fbUser: FirebaseUser,
-  signupRequestedRoleSlug?: string
+  signupContext?: GoogleSignupContext
 ): Promise<{
-  sessionUser: SessionUser;
+  sessionUser: SessionUser | null;
+  pendingRegistration: PendingRegistrationInfo | null;
   libraryIdentity: LibraryIdentity | null;
+  syncSummary?: string;
 }> {
   const db = getFirestoreClient();
   const uid = sanitizeDocId(fbUser.uid);
   const email = clampString(fbUser.email, 160, `${uid}@google.local`);
-  const displayName = clampString(fbUser.displayName, 120, email.split('@')[0] || 'Pengguna Google');
+  const displayName = clampString(
+    signupContext?.fullName || fbUser.displayName,
+    120,
+    email.split('@')[0] || 'Pengguna Google'
+  );
 
-  // 1. Determine role (Bootstrap admin -> staff_roles/{uid} -> default anggota)
-  let roleSlug = 'anggota';
+  // Load public library settings for identity & leadership conflict detection
+  let libraryIdentity: LibraryIdentity | null = null;
+  let globalSettingVals: Record<string, string> = {};
+  try {
+    const globalSnap = await getDoc(doc(db, 'library_settings', 'global'));
+    if (globalSnap.exists()) {
+      globalSettingVals = (globalSnap.data().values as Record<string, string>) || {};
+      libraryIdentity = extractLibraryIdentity(globalSettingVals);
+    }
+  } catch {
+    // Public fallback to defaultLibrary
+  }
+
+  // 1. Check Bootstrap admin or existing staff_roles/{uid}
+  let roleSlug = '';
   const bootstrapAdmins = [
     BOOTSTRAP_ADMIN_EMAIL.toLowerCase().trim(),
     'nobuhikokagamihara@gmail.com',
@@ -138,7 +237,7 @@ async function resolveFirebaseSession(
     try {
       const roleSnap = await getDoc(doc(db, 'staff_roles', uid));
       if (roleSnap.exists() && roleSnap.data().isActive === true) {
-        const candidate = String(roleSnap.data().role || 'anggota');
+        const candidate = String(roleSnap.data().role || '');
         if (/^[a-z][a-z0-9_]*$/.test(candidate)) {
           roleSlug = candidate;
         }
@@ -148,77 +247,327 @@ async function resolveFirebaseSession(
     }
   }
 
-  // 2. Ensure /users/{uid} exists (always create with role: 'anggota' per security rules)
-  const cleanRequestedRole =
-    signupRequestedRoleSlug && signupRequestedRoleSlug !== 'super_admin' && /^[a-z][a-z0-9_]*$/.test(signupRequestedRoleSlug)
-      ? signupRequestedRoleSlug
-      : '';
-  const needsApproval = cleanRequestedRole ? doesRoleRequireApproval(cleanRequestedRole) : false;
-
-  let userDocData: Record<string, unknown> | null = null;
+  // 2. Check existing /users/{uid} and /registration_requests/{uid}
+  let existingUserSnapData: Record<string, unknown> | null = null;
   try {
     const userSnap = await getDoc(doc(db, 'users', uid));
-    if (!userSnap.exists()) {
+    if (userSnap.exists()) {
+      existingUserSnapData = userSnap.data();
+    }
+  } catch (err) {
+    handleFirestoreError(err, OperationType.GET, `users/${uid}`);
+  }
+
+  let existingRegReq: Record<string, unknown> | null = null;
+  if (!roleSlug && !existingUserSnapData) {
+    try {
+      const reqSnap = await getDoc(doc(db, 'registration_requests', uid));
+      if (reqSnap.exists()) {
+        existingRegReq = reqSnap.data();
+      }
+    } catch {
+      // ignore if none
+    }
+  }
+
+  // If user is NOT an active user yet and already has a pending registration_request in Firestore,
+  // keep showing their persisted pending status even after closing & reopening the browser!
+  if (!roleSlug && !existingUserSnapData && existingRegReq) {
+    const reqStatus = String(existingRegReq.status || 'pending') as 'pending' | 'rejected' | 'approved';
+    const reqRoleSlug = String(existingRegReq.requestedRole || 'anggota');
+    if (reqStatus === 'pending' || (reqStatus === 'rejected' && !signupContext?.roleSlug)) {
+      return {
+        sessionUser: null,
+        pendingRegistration: {
+          requestId: uid,
+          requestCode: String(existingRegReq.requestCode || ''),
+          email: String(existingRegReq.email || email),
+          fullName: String(existingRegReq.fullName || displayName),
+          requestedRoleSlug: reqRoleSlug,
+          requestedRoleName: ROLE_LABELS[reqRoleSlug] || reqRoleSlug,
+          assignedClass: String(existingRegReq.assignedClass || ''),
+          hasConflict: Boolean(existingRegReq.hasConflict),
+          conflictType: String(existingRegReq.conflictType || ''),
+          conflictExistingValue: String(existingRegReq.conflictExistingValue || ''),
+          conflictSummary: String(existingRegReq.conflictSummary || ''),
+          status: reqStatus,
+          decisionNote: String(existingRegReq.decisionNote || ''),
+          source: 'firestore',
+        },
+        libraryIdentity,
+      };
+    }
+    // If previous request was rejected and user is submitting a new signup, remove the old rejected doc first
+    if (reqStatus === 'rejected' && signupContext?.roleSlug) {
+      try {
+        await deleteDoc(doc(db, 'registration_requests', uid));
+      } catch {
+        // ignore
+      }
+    }
+  }
+
+  // 3. New signup evaluation (when no active users/{uid} exists yet and not bootstrap admin)
+  const cleanRequestedRole =
+    signupContext?.roleSlug &&
+    signupContext.roleSlug !== 'super_admin' &&
+    /^[a-z][a-z0-9_]*$/.test(signupContext.roleSlug)
+      ? signupContext.roleSlug
+      : 'anggota';
+
+  const assignedClass = clampString(signupContext?.assignedClass, 60, '');
+  const extraMeta = signupContext?.extraMeta || {};
+  const unitOrClass = buildUnitOrClassLabel(cleanRequestedRole, assignedClass, extraMeta);
+  const identityNumber = clampString(signupContext?.identityNumber, 64, '');
+  const gender = clampString(signupContext?.gender, 24, '');
+  const phone = clampString(signupContext?.phone, 32, '');
+
+  let syncSummary = '';
+
+  if (!roleSlug && !existingUserSnapData) {
+    // Detect conflict for wali_kelas / guru_pendamping against public_classes / school_classes
+    let classRecord: {
+      docId: string;
+      className: string;
+      gradeLevel: number;
+      homeroomTeacher: string;
+      companionTeacher: string;
+    } | null = null;
+
+    if (assignedClass) {
+      const classDocId = sanitizeDocId(classNameToDocId(assignedClass));
+      try {
+        const scSnap = await getDoc(doc(db, 'school_classes', classDocId));
+        if (scSnap.exists()) {
+          const d = scSnap.data();
+          classRecord = {
+            docId: classDocId,
+            className: String(d.className || assignedClass),
+            gradeLevel: Number(d.gradeLevel || 1),
+            homeroomTeacher: String(d.homeroomTeacher || ''),
+            companionTeacher: String(d.companionTeacher || ''),
+          };
+        } else {
+          const pcSnap = await getDoc(doc(db, 'public_classes', classDocId));
+          if (pcSnap.exists()) {
+            const d = pcSnap.data();
+            classRecord = {
+              docId: classDocId,
+              className: String(d.className || assignedClass),
+              gradeLevel: Number(d.gradeLevel || 1),
+              homeroomTeacher: String(d.homeroomTeacher || ''),
+              companionTeacher: String(d.companionTeacher || ''),
+            };
+          }
+        }
+      } catch {
+        // ignore lookup failure
+      }
+    }
+
+    const classConflict = detectClassTeacherConflict({
+      roleSlug: cleanRequestedRole,
+      selectedClass: assignedClass,
+      applicantFullName: displayName,
+      classRecord,
+    });
+
+    const leadershipConflict = detectLibraryLeadershipConflict({
+      roleSlug: cleanRequestedRole,
+      applicantFullName: displayName,
+      principalName: globalSettingVals.principal_name,
+      librarianHeadName: globalSettingVals.librarian_head_name,
+    });
+
+    const effectiveConflict = classConflict.hasConflict
+      ? classConflict
+      : leadershipConflict.hasConflict
+        ? leadershipConflict
+        : classConflict;
+
+    const needsApproval = doesRoleRequireApproval(cleanRequestedRole);
+    const mustQueuePending = needsApproval || classConflict.hasConflict;
+
+    if (mustQueuePending) {
+      // Persist ONLY to Firestore registration_requests/{uid} with status: 'pending'.
+      // Do NOT create users/{uid}, members, or staff_roles until approved!
+      const requestCode = buildRegistrationRequestCode();
+      try {
+        await setDoc(doc(db, 'registration_requests', uid), {
+          requestCode,
+          requesterUid: uid,
+          email,
+          fullName: displayName,
+          requestedRole: cleanRequestedRole,
+          assignedClass,
+          teacherSlot: classConflict.slot || '',
+          unitOrClass,
+          identityNumber,
+          gender,
+          phone,
+          extraMeta,
+          hasConflict: effectiveConflict.hasConflict,
+          conflictType: effectiveConflict.conflictType || '',
+          conflictExistingValue: effectiveConflict.existingValue || '',
+          conflictSummary: effectiveConflict.summary || '',
+          status: 'pending',
+          decisionNote: '',
+          resolution: {},
+          reviewedByUid: '',
+          reviewedByName: '',
+          reviewedAt: '',
+          createdAt: serverTimestamp(),
+          updatedAt: serverTimestamp(),
+        });
+      } catch (err) {
+        handleFirestoreError(err, OperationType.CREATE, `registration_requests/${uid}`);
+      }
+
+      setGatewayFirebaseActor(null);
+      return {
+        sessionUser: null,
+        pendingRegistration: {
+          requestId: uid,
+          requestCode,
+          email,
+          fullName: displayName,
+          requestedRoleSlug: cleanRequestedRole,
+          requestedRoleName: ROLE_LABELS[cleanRequestedRole] || cleanRequestedRole,
+          assignedClass,
+          hasConflict: effectiveConflict.hasConflict,
+          conflictType: effectiveConflict.conflictType || '',
+          conflictExistingValue: effectiveConflict.existingValue || '',
+          conflictSummary: effectiveConflict.summary || '',
+          status: 'pending',
+          source: 'firestore',
+        },
+        libraryIdentity,
+      };
+    }
+
+    // Conflict-free immediate self-signup in Firestore
+    const safeRole = ALLOWED_SELF_SIGNUP_ROLES.has(cleanRequestedRole) ? cleanRequestedRole : 'anggota';
+    roleSlug = safeRole;
+
+    try {
       await setDoc(doc(db, 'users', uid), {
         uid,
         email,
         fullName: displayName,
-        role: 'anggota',
-        ...(cleanRequestedRole ? { requestedRole: cleanRequestedRole } : {}),
-        approvalStatus: needsApproval ? 'pending' : 'approved',
+        role: safeRole,
+        requestedRole: safeRole,
+        approvalStatus: 'approved',
+        assignedClass,
         memberId: '',
         memberCode: '',
         isActive: true,
         createdAt: serverTimestamp(),
         updatedAt: serverTimestamp(),
       });
-      if (roleSlug === 'super_admin') {
-        await updateDoc(doc(db, 'users', uid), {
-          role: 'super_admin',
-          approvalStatus: 'approved',
-          updatedAt: serverTimestamp(),
-        });
-      }
-      userDocData = {
+      existingUserSnapData = {
         uid,
         email,
         fullName: displayName,
-        role: roleSlug,
-        requestedRole: cleanRequestedRole,
-        approvalStatus: roleSlug === 'super_admin' ? 'approved' : needsApproval ? 'pending' : 'approved',
+        role: safeRole,
+        requestedRole: safeRole,
+        approvalStatus: 'approved',
+        assignedClass,
         memberId: '',
         memberCode: '',
+        isActive: true,
       };
-    } else {
-      userDocData = userSnap.data();
-      if (roleSlug === 'super_admin' && userDocData?.role !== 'super_admin') {
+
+      // Directly sync empty wali_kelas / guru_pendamping slot to school_classes & public_classes
+      if (
+        (safeRole === 'wali_kelas' || safeRole === 'guru_pendamping') &&
+        assignedClass &&
+        classRecord &&
+        !classConflict.hasConflict
+      ) {
+        const teacherField = safeRole === 'wali_kelas' ? 'homeroomTeacher' : 'companionTeacher';
+        try {
+          await updateDoc(doc(db, 'school_classes', classRecord.docId), {
+            [teacherField]: displayName,
+            updatedByUid: uid,
+            updatedAt: serverTimestamp(),
+          });
+          await updateDoc(doc(db, 'public_classes', classRecord.docId), {
+            [teacherField]: displayName,
+            updatedAt: serverTimestamp(),
+          }).catch(() => {});
+          syncSummary = `${ROLE_LABELS[safeRole] || safeRole} untuk ${assignedClass} langsung tersinkron ke data kelas.`;
+        } catch {
+          // ignore if class doc not yet seeded
+        }
+      }
+    } catch (err) {
+      handleFirestoreError(err, OperationType.WRITE, `users/${uid}`);
+    }
+  } else if (!existingUserSnapData && roleSlug === 'super_admin') {
+    // Bootstrap admin first login
+    try {
+      await setDoc(doc(db, 'users', uid), {
+        uid,
+        email,
+        fullName: displayName,
+        role: 'super_admin',
+        approvalStatus: 'approved',
+        assignedClass: '',
+        memberId: '',
+        memberCode: '',
+        isActive: true,
+        createdAt: serverTimestamp(),
+        updatedAt: serverTimestamp(),
+      });
+      existingUserSnapData = {
+        uid,
+        email,
+        fullName: displayName,
+        role: 'super_admin',
+        approvalStatus: 'approved',
+        assignedClass: '',
+        memberId: '',
+        memberCode: '',
+        isActive: true,
+      };
+    } catch (err) {
+      handleFirestoreError(err, OperationType.WRITE, `users/${uid}`);
+    }
+  } else if (existingUserSnapData) {
+    if (roleSlug === 'super_admin' && existingUserSnapData.role !== 'super_admin') {
+      try {
         await updateDoc(doc(db, 'users', uid), {
           role: 'super_admin',
           approvalStatus: 'approved',
           updatedAt: serverTimestamp(),
         });
-      }
-      if (
-        roleSlug === 'anggota' &&
-        userDocData?.role &&
-        typeof userDocData.role === 'string' &&
-        !isStaffRoleSlug(userDocData.role)
-      ) {
-        roleSlug = userDocData.role;
+      } catch {
+        // ignore
       }
     }
-  } catch (err) {
-    handleFirestoreError(err, OperationType.WRITE, `users/${uid}`);
+    if (!roleSlug) {
+      const storedRole = String(existingUserSnapData.role || 'anggota');
+      roleSlug = /^[a-z][a-z0-9_]*$/.test(storedRole) ? storedRole : 'anggota';
+    }
   }
 
-  // 3. Seed database idempotently when a staff member signs in
+  if (!roleSlug) roleSlug = 'anggota';
+
+  // 4. Seed database idempotently when a staff member signs in
   if (isStaffRoleSlug(roleSlug)) {
+    const { ensureFirestoreSeeded } = await import('@/lib/firebase/firestore-seed');
     await ensureFirestoreSeeded(uid, displayName);
   }
 
-  // 4. Ensure linked member record for non-staff / non-visitor users
-  let memberDocId: string | null = userDocData?.memberId ? String(userDocData.memberId) : null;
+  // 5. Ensure linked member record for non-staff / non-visitor users
+  let memberDocId: string | null = existingUserSnapData?.memberId
+    ? String(existingUserSnapData.memberId)
+    : null;
   let memberNumericId: number | null = null;
+  const userAssignedClass = existingUserSnapData?.assignedClass
+    ? String(existingUserSnapData.assignedClass)
+    : assignedClass;
+
   if (!isStaffRoleSlug(roleSlug) && roleSlug !== 'pengunjung') {
     try {
       const mQuery = query(collection(db, 'members'), where('ownerUid', '==', uid));
@@ -233,18 +582,32 @@ async function resolveFirebaseSession(
         const memberCode = `AGT-2026-${uid.slice(0, 6).toUpperCase()}`;
         const todayStr = formatIsoDate(new Date());
         const expiresAt = addDaysIso(todayStr, 365);
+        const targetTypeCode =
+          resolveMembershipTypeCodeForSignup({
+            roleSlug,
+            assignedClass: userAssignedClass,
+            memberSubStatus: extraMeta.memberSubStatus,
+          }) || 'SISWA_TINGGI';
+        const mTypeMap: Record<string, { id: string; name: string }> = {
+          SISWA_RENDAH: { id: 'mtype_1', name: 'Siswa Kelas 1–3' },
+          SISWA_TINGGI: { id: 'mtype_2', name: 'Siswa Kelas 4–6' },
+          GURU: { id: 'mtype_3', name: 'Guru & Wali Kelas' },
+          STAF: { id: 'mtype_4', name: 'Staf & Tata Usaha' },
+          KOMITE: { id: 'mtype_5', name: 'Orang Tua / Komite Sekolah' },
+        };
+        const mTypeChoice = mTypeMap[targetTypeCode] || mTypeMap.SISWA_TINGGI;
 
         await setDoc(doc(db, 'members', candidateDocId), {
           numericId,
           memberCode,
           fullName: displayName,
-          membershipTypeId: 'mtype_2',
-          membershipTypeName: 'Siswa Kelas 4–6',
-          identityNumber: '',
-          gender: 'Tidak Disebutkan',
-          unitOrClass: ROLE_LABELS[roleSlug] || 'Siswa SD',
+          membershipTypeId: mTypeChoice.id,
+          membershipTypeName: mTypeChoice.name,
+          identityNumber,
+          gender: gender === 'L' ? 'Laki-laki' : gender === 'P' ? 'Perempuan' : 'Tidak Disebutkan',
+          unitOrClass: unitOrClass || userAssignedClass || ROLE_LABELS[roleSlug] || 'Siswa SD',
           address: '',
-          phone: '',
+          phone,
           email,
           registeredAt: todayStr,
           expiresAt,
@@ -269,23 +632,12 @@ async function resolveFirebaseSession(
     }
   }
 
-  // 5. Load library identity and role permissions
-  let libraryIdentity: LibraryIdentity | null = null;
+  // 6. Load role permissions
   let permissions =
     ROLE_PERMISSION_DEFAULTS[roleSlug] ||
     SCHOOL_ROLE_MAP.get(roleSlug)?.permissions ||
     ROLE_PERMISSION_DEFAULTS.anggota;
   let customRoleName = '';
-
-  try {
-    const globalSnap = await getDoc(doc(db, 'library_settings', 'global'));
-    if (globalSnap.exists()) {
-      const vals = (globalSnap.data().values as Record<string, string>) || {};
-      libraryIdentity = extractLibraryIdentity(vals);
-    }
-  } catch {
-    // Public fallback to defaultLibrary if unseeded yet
-  }
 
   if (isStaffRoleSlug(roleSlug) || !SCHOOL_ROLE_MAP.has(roleSlug)) {
     try {
@@ -306,9 +658,12 @@ async function resolveFirebaseSession(
     }
   }
 
-  const roleName = customRoleName || ROLE_LABELS[roleSlug] || 'Siswa / Guru';
-  const approvalStatus = (userDocData?.approvalStatus as 'approved' | 'pending' | 'rejected') || 'approved';
-  const requestedRoleSlug = userDocData?.requestedRole ? String(userDocData.requestedRole) : null;
+  const roleName = customRoleName || ROLE_LABELS[roleSlug] || 'Warga Sekolah';
+  const approvalStatus =
+    (existingUserSnapData?.approvalStatus as 'approved' | 'pending' | 'rejected') || 'approved';
+  const requestedRoleSlug = existingUserSnapData?.requestedRole
+    ? String(existingUserSnapData.requestedRole)
+    : null;
 
   setGatewayFirebaseActor({
     uid,
@@ -329,6 +684,7 @@ async function resolveFirebaseSession(
     fullName: displayName,
     roleSlug,
     roleName,
+    assignedClass: userAssignedClass,
     memberId: memberNumericId,
     memberDocId,
     permissions,
@@ -336,7 +692,7 @@ async function resolveFirebaseSession(
     requestedRoleSlug,
   };
 
-  return { sessionUser, libraryIdentity };
+  return { sessionUser, pendingRegistration: null, libraryIdentity, syncSummary };
 }
 
 export function AuthProvider({
@@ -351,6 +707,9 @@ export function AuthProvider({
   initialUnreadNotifications?: number;
 }) {
   const [user, setUser] = useState<SessionUser | null>(initialUser ?? null);
+  const [pendingRegistration, setPendingRegistration] = useState<PendingRegistrationInfo | null>(
+    null
+  );
   const [library, setLibrary] = useState<LibraryIdentity>(initialLibrary ?? defaultLibrary);
   const [unreadNotifications, setUnreadNotifications] = useState(initialUnreadNotifications ?? 0);
   const [loading, setLoading] = useState(initialUser === undefined);
@@ -358,6 +717,10 @@ export function AuthProvider({
   const [firebaseUid, setFirebaseUid] = useState<string | null>(null);
   const [authReady, setAuthReady] = useState(false);
   const loginInProgressRef = useRef(false);
+
+  const clearPendingRegistration = useCallback(() => {
+    setPendingRegistration(null);
+  }, []);
 
   const loadLocalSession = useCallback(async () => {
     if (IS_FIRESTORE_ONLY_MODE) {
@@ -371,7 +734,7 @@ export function AuthProvider({
           setLibrary(extractLibraryIdentity(vals));
         }
       } catch {
-        // Public fallback to defaultLibrary if unseeded or offline
+        // Public fallback
       } finally {
         setLoading(false);
       }
@@ -402,11 +765,12 @@ export function AuthProvider({
   const refreshSession = useCallback(async () => {
     const auth = getAuthClient();
     if (auth.currentUser && auth.currentUser.emailVerified) {
-      const { sessionUser, libraryIdentity } = await resolveFirebaseSession(auth.currentUser);
-      setUser(sessionUser);
-      if (libraryIdentity) setLibrary(libraryIdentity);
+      const resolved = await resolveFirebaseSession(auth.currentUser);
+      setUser(resolved.sessionUser);
+      setPendingRegistration(resolved.pendingRegistration);
+      if (resolved.libraryIdentity) setLibrary(resolved.libraryIdentity);
       setAuthMode('firebase');
-      setFirebaseUid(auth.currentUser.uid);
+      setFirebaseUid(resolved.sessionUser ? auth.currentUser.uid : null);
       setLoading(false);
       return;
     }
@@ -425,16 +789,18 @@ export function AuthProvider({
       if (loginInProgressRef.current) return;
       try {
         if (fbUser && fbUser.emailVerified) {
-          const { sessionUser, libraryIdentity } = await resolveFirebaseSession(fbUser);
+          const resolved = await resolveFirebaseSession(fbUser);
           if (!active) return;
-          setUser(sessionUser);
-          if (libraryIdentity) setLibrary(libraryIdentity);
+          setUser(resolved.sessionUser);
+          setPendingRegistration(resolved.pendingRegistration);
+          if (resolved.libraryIdentity) setLibrary(resolved.libraryIdentity);
           setAuthMode('firebase');
-          setFirebaseUid(fbUser.uid);
+          setFirebaseUid(resolved.sessionUser ? fbUser.uid : null);
           setLoading(false);
         } else {
           setGatewayFirebaseActor(null);
           if (!active) return;
+          setPendingRegistration(null);
           setAuthMode('local');
           setFirebaseUid(null);
           await loadLocalSession();
@@ -460,14 +826,12 @@ export function AuthProvider({
     };
   }, [loadLocalSession]);
 
-  // Keep browser document title synchronized whenever library name is updated in /settings
   useEffect(() => {
     if (typeof document !== 'undefined' && library.name) {
       document.title = `${library.name} — Sistem Perpustakaan Sekolah Dasar`;
     }
   }, [library.name]);
 
-  // Real-time Firestore notification badge listener (bounded for Spark Free Tier read quota)
   const userRoleSlug = user?.roleSlug || '';
   useEffect(() => {
     if (!authReady || !firebaseUid || !userRoleSlug) return;
@@ -502,11 +866,12 @@ export function AuthProvider({
           try {
             await signOut(auth);
           } catch {
-            // ignore Firebase signOut errors when switching to local login
+            // ignore
           }
         }
         setGatewayFirebaseActor(null);
         setFirebaseUid(null);
+        setPendingRegistration(null);
         setAuthMode('local');
 
         const res = await fetch('/api/auth/login', {
@@ -516,6 +881,22 @@ export function AuthProvider({
         });
         const data = await res.json();
         if (!res.ok) {
+          if (data.pendingApproval && data.requestCode) {
+            setPendingRegistration({
+              requestCode: String(data.requestCode),
+              email: identifier.trim(),
+              fullName: identifier.trim(),
+              requestedRoleSlug: '',
+              requestedRoleName: String(data.roleName || 'Warga Sekolah'),
+              assignedClass: String(data.assignedClass || ''),
+              hasConflict: Boolean(data.hasConflict),
+              conflictType: '',
+              conflictExistingValue: '',
+              conflictSummary: String(data.conflictSummary || ''),
+              status: 'pending',
+              source: 'local',
+            });
+          }
           throw new Error(data.error || 'Email/username atau kata sandi tidak valid.');
         }
 
@@ -530,7 +911,6 @@ export function AuthProvider({
         markGatewayAuthReady();
         setLoading(false);
 
-        // Sync unread notifications & library metadata in background
         void loadLocalSession();
         return loggedUser;
       } finally {
@@ -566,18 +946,39 @@ export function AuthProvider({
           throw new Error(data.error || 'Pendaftaran akun gagal.');
         }
 
-        const signedUser = data.user as SessionUser;
         if (data.pendingApproval) {
+          setPendingRegistration({
+            requestId: data.requestId,
+            requestCode: String(data.requestCode || ''),
+            email: payload.email,
+            fullName: payload.fullName,
+            requestedRoleSlug: payload.roleSlug,
+            requestedRoleName: ROLE_LABELS[payload.roleSlug] || payload.roleSlug,
+            assignedClass: payload.assignedClass || '',
+            hasConflict: Boolean(data.hasConflict),
+            conflictType: data.conflictInfo?.conflictType || '',
+            conflictExistingValue: data.conflictInfo?.existingValue || '',
+            conflictSummary: data.conflictInfo?.summary || '',
+            status: 'pending',
+            source: 'local',
+          });
           return {
             pendingApproval: true,
-            message: String(data.message || 'Menunggu persetujuan Super Admin.'),
-            user: signedUser,
+            requestCode: String(data.requestCode || ''),
+            hasConflict: Boolean(data.hasConflict),
+            conflictInfo: data.conflictInfo || null,
+            message: String(
+              data.message ||
+                'Pendaftaran berstatus Pending menunggu persetujuan Super Admin / Admin / Kepala Perpustakaan.'
+            ),
           };
         }
 
+        const signedUser = data.user as SessionUser;
         if (data.token) {
           setLocalSessionToken(String(data.token));
         }
+        setPendingRegistration(null);
         setUser(signedUser);
         setAuthMode('local');
         setFirebaseUid(null);
@@ -588,7 +989,8 @@ export function AuthProvider({
 
         return {
           pendingApproval: false,
-          message: 'Akun berhasil dibuat.',
+          syncSummary: data.syncSummary ? String(data.syncSummary) : '',
+          message: data.syncSummary ? String(data.syncSummary) : 'Akun berhasil dibuat.',
           user: signedUser,
         };
       } finally {
@@ -598,39 +1000,71 @@ export function AuthProvider({
     [loadLocalSession]
   );
 
-  const loginWithGoogle = useCallback(async (requestedRoleSlug?: string) => {
-    loginInProgressRef.current = true;
-    try {
-      const auth = getAuthClient();
-      const cred = await signInWithPopup(auth, googleProvider);
-      if (!cred.user.emailVerified) {
-        await signOut(auth);
-        throw new Error('auth/email-not-verified');
-      }
-      // Clear any local session so local cookie never conflicts with Firebase mode
-      setLocalSessionToken(null);
+  const loginWithGoogle = useCallback(
+    async (signupContextArg?: string | GoogleSignupContext): Promise<GoogleLoginResult> => {
+      loginInProgressRef.current = true;
       try {
-        await fetch('/api/auth/logout', { method: 'POST' });
-      } catch {
-        // ignore
-      }
+        const ctx: GoogleSignupContext | undefined =
+          typeof signupContextArg === 'string'
+            ? { roleSlug: signupContextArg }
+            : signupContextArg;
 
-      const { sessionUser, libraryIdentity } = await resolveFirebaseSession(
-        cred.user,
-        requestedRoleSlug
-      );
-      setUser(sessionUser);
-      if (libraryIdentity) setLibrary(libraryIdentity);
-      setAuthMode('firebase');
-      setFirebaseUid(cred.user.uid);
-      setAuthReady(true);
-      markGatewayAuthReady();
-      setLoading(false);
-      return sessionUser;
-    } finally {
-      loginInProgressRef.current = false;
-    }
-  }, []);
+        const auth = getAuthClient();
+        const cred = await signInWithPopup(auth, googleProvider);
+        if (!cred.user.emailVerified) {
+          await signOut(auth);
+          throw new Error('auth/email-not-verified');
+        }
+        setLocalSessionToken(null);
+        try {
+          await fetch('/api/auth/logout', { method: 'POST' });
+        } catch {
+          // ignore
+        }
+
+        const resolved = await resolveFirebaseSession(cred.user, ctx);
+        if (resolved.libraryIdentity) setLibrary(resolved.libraryIdentity);
+
+        if (!resolved.sessionUser && resolved.pendingRegistration) {
+          setUser(null);
+          setPendingRegistration(resolved.pendingRegistration);
+          setAuthMode('firebase');
+          setFirebaseUid(null);
+          setAuthReady(true);
+          markGatewayAuthReady();
+          setLoading(false);
+          return {
+            pendingApproval: true,
+            pendingRegistration: resolved.pendingRegistration,
+            message:
+              resolved.pendingRegistration.status === 'rejected'
+                ? resolved.pendingRegistration.decisionNote ||
+                  'Pendaftaran akun Anda ditolak sehingga akun tidak disimpan.'
+                : resolved.pendingRegistration.hasConflict
+                  ? `Terdeteksi konflik data (${resolved.pendingRegistration.conflictExistingValue}). Pendaftaran Anda (${resolved.pendingRegistration.requestCode}) tersimpan di Firestore dengan status Pending. Anda dapat menutup browser dengan aman.`
+                  : `Pendaftaran Anda (${resolved.pendingRegistration.requestCode}) tersimpan di Firestore dengan status Pending menunggu persetujuan Super Admin / Admin / Kepala Perpustakaan.`,
+            user: null,
+          };
+        }
+
+        setPendingRegistration(null);
+        setUser(resolved.sessionUser);
+        setAuthMode('firebase');
+        setFirebaseUid(cred.user.uid);
+        setAuthReady(true);
+        markGatewayAuthReady();
+        setLoading(false);
+        return {
+          pendingApproval: false,
+          syncSummary: resolved.syncSummary,
+          user: resolved.sessionUser,
+        };
+      } finally {
+        loginInProgressRef.current = false;
+      }
+    },
+    []
+  );
 
   const logout = useCallback(async (redirectTo = '/catalog') => {
     const auth = getAuthClient();
@@ -644,6 +1078,7 @@ export function AuthProvider({
     setLocalSessionToken(null);
     setGatewayFirebaseActor(null);
     setFirebaseUid(null);
+    setPendingRegistration(null);
     setAuthMode('local');
     try {
       await fetch('/api/auth/logout', { method: 'POST' });
@@ -668,12 +1103,14 @@ export function AuthProvider({
     <AuthContext.Provider
       value={{
         user,
+        pendingRegistration,
         library,
         unreadNotifications,
         loading,
         authMode,
         isFirebaseSession: authMode === 'firebase',
         refreshSession,
+        clearPendingRegistration,
         loginWithCredentials,
         signupWithCredentials,
         loginWithGoogle,

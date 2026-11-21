@@ -613,6 +613,60 @@ export const MIGRATIONS: Migration[] = [
       CREATE INDEX IF NOT EXISTS idx_users_approval_status ON users(approval_status);
     `,
   },
+  {
+    id: '007_rombel_management',
+    up: `
+      ALTER TABLE school_classes ADD COLUMN room_label TEXT NOT NULL DEFAULT '';
+      ALTER TABLE school_classes ADD COLUMN notes TEXT NOT NULL DEFAULT '';
+      ALTER TABLE school_classes ADD COLUMN archived_at TEXT;
+
+      CREATE INDEX IF NOT EXISTS idx_school_classes_archived ON school_classes(archived_at, grade_level, class_name);
+    `,
+  },
+  {
+    id: '008_registration_requests',
+    up: `
+      ALTER TABLE users ADD COLUMN assigned_class TEXT NOT NULL DEFAULT '';
+
+      CREATE TABLE IF NOT EXISTS registration_requests (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        request_code TEXT NOT NULL UNIQUE,
+        username TEXT NOT NULL,
+        email TEXT NOT NULL,
+        full_name TEXT NOT NULL,
+        password_hash TEXT NOT NULL DEFAULT '',
+        requested_role_id INTEGER NOT NULL,
+        requested_role_slug TEXT NOT NULL,
+        assigned_class TEXT NOT NULL DEFAULT '',
+        teacher_slot TEXT NOT NULL DEFAULT '',
+        unit_or_class TEXT NOT NULL DEFAULT '',
+        identity_number TEXT NOT NULL DEFAULT '',
+        gender TEXT NOT NULL DEFAULT '',
+        phone TEXT NOT NULL DEFAULT '',
+        extra_meta_json TEXT NOT NULL DEFAULT '{}',
+        has_conflict INTEGER NOT NULL DEFAULT 0,
+        conflict_type TEXT NOT NULL DEFAULT '',
+        conflict_existing_value TEXT NOT NULL DEFAULT '',
+        conflict_existing_user_id INTEGER,
+        conflict_summary TEXT NOT NULL DEFAULT '',
+        status TEXT NOT NULL DEFAULT 'pending',
+        decision_note TEXT NOT NULL DEFAULT '',
+        resolution_json TEXT NOT NULL DEFAULT '{}',
+        reviewed_by_user_id INTEGER,
+        reviewed_by_name TEXT NOT NULL DEFAULT '',
+        reviewed_at TEXT,
+        created_at TEXT NOT NULL DEFAULT (datetime('now')),
+        updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+        FOREIGN KEY (requested_role_id) REFERENCES roles(id) ON DELETE RESTRICT,
+        FOREIGN KEY (conflict_existing_user_id) REFERENCES users(id) ON DELETE SET NULL,
+        FOREIGN KEY (reviewed_by_user_id) REFERENCES users(id) ON DELETE SET NULL
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_reg_requests_status ON registration_requests(status, created_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_reg_requests_email ON registration_requests(email, status);
+      CREATE INDEX IF NOT EXISTS idx_reg_requests_username ON registration_requests(username, status);
+    `,
+  },
 ];
 
 export function runMigrations(db: Database.Database): void {

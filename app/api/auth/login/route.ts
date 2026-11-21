@@ -54,7 +54,68 @@ export async function POST(req: NextRequest) {
         }
       | undefined;
 
-    if (!user || !verifyPassword(password, user.password_hash)) {
+    if (!user) {
+      const regReq = db
+        .prepare(
+          `SELECT rr.request_code, rr.status, rr.password_hash, rr.assigned_class,
+                  rr.has_conflict, rr.conflict_summary, rr.decision_note, r.name as role_name
+           FROM registration_requests rr
+           JOIN roles r ON r.id = rr.requested_role_id
+           WHERE lower(rr.email) = ? OR lower(rr.username) = ?
+           ORDER BY rr.id DESC LIMIT 1`
+        )
+        .get(identifier, identifier) as
+        | {
+            request_code: string;
+            status: string;
+            password_hash: string;
+            assigned_class: string;
+            has_conflict: number;
+            conflict_summary: string;
+            decision_note: string;
+            role_name: string;
+          }
+        | undefined;
+
+      if (regReq && regReq.status === 'pending' && regReq.password_hash && verifyPassword(password, regReq.password_hash)) {
+        return NextResponse.json(
+          {
+            error:
+              regReq.has_conflict === 1
+                ? `Pendaftaran Anda (${regReq.request_code}) sebagai "${regReq.role_name}" untuk ${regReq.assigned_class} masih berstatus Pending karena ada konflik data. Menunggu keputusan Super Admin / Admin / Kepala Perpustakaan.`
+                : `Pendaftaran Anda (${regReq.request_code}) sebagai "${regReq.role_name}" masih berstatus Pending menunggu persetujuan Super Admin / Admin / Kepala Perpustakaan.`,
+            pendingApproval: true,
+            status: 'pending',
+            requestCode: regReq.request_code,
+            roleName: regReq.role_name,
+            assignedClass: regReq.assigned_class,
+            hasConflict: regReq.has_conflict === 1,
+            conflictSummary: regReq.conflict_summary,
+          },
+          { status: 403 }
+        );
+      }
+
+      if (regReq && regReq.status === 'rejected') {
+        return NextResponse.json(
+          {
+            error: regReq.decision_note
+              ? `Pendaftaran Anda (${regReq.request_code}) ditolak dan akun tidak disimpan. Catatan: ${regReq.decision_note}`
+              : `Pendaftaran Anda (${regReq.request_code}) ditolak oleh pengelola sehingga akun tidak disimpan. Anda dapat mendaftar ulang dengan data yang sesuai.`,
+            status: 'rejected',
+            requestCode: regReq.request_code,
+          },
+          { status: 403 }
+        );
+      }
+
+      return NextResponse.json(
+        { error: 'Email/username atau kata sandi tidak valid.' },
+        { status: 401 }
+      );
+    }
+
+    if (!verifyPassword(password, user.password_hash)) {
       return NextResponse.json(
         { error: 'Email/username atau kata sandi tidak valid.' },
         { status: 401 }

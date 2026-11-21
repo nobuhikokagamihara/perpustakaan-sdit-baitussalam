@@ -12,9 +12,11 @@ import {
   FileSpreadsheet,
   HardDriveDownload,
   History,
+  Lock,
   RefreshCw,
   RotateCcw,
   Save,
+  ShieldAlert,
   ShieldCheck,
   Trash2,
   Upload,
@@ -32,6 +34,8 @@ import {
 } from '@/components/ui/DesignPrimitives';
 import {
   CORE_BACKUP_MODULES,
+  PRESERVED_SYSTEM_ITEMS,
+  PURGE_CONFIRMATION_PHRASE,
   formatBytes,
   type BackupModuleId,
 } from '@/lib/domain/settings-backup-rules';
@@ -45,6 +49,7 @@ import type {
 
 interface BackupCenterTabProps {
   canWrite: boolean;
+  currentUserRoleSlug?: string;
   onSystemMutated: () => Promise<void>;
   notify: (msg: string, tone?: 'success' | 'error' | 'info') => void;
 }
@@ -58,9 +63,11 @@ const FREQUENCY_LABELS: Record<string, string> = {
 
 export function BackupCenterTab({
   canWrite,
+  currentUserRoleSlug,
   onSystemMutated,
   notify,
 }: BackupCenterTabProps) {
+  const isSuperAdmin = canWrite && currentUserRoleSlug === 'super_admin';
   const [meta, setMeta] = useState<BackupMetaPayload | null>(null);
   const [loading, setLoading] = useState(true);
 
@@ -91,6 +98,19 @@ export function BackupCenterTab({
   // Delete snapshot confirmation
   const [deleteTarget, setDeleteTarget] = useState<BackupSnapshotItem | null>(null);
   const [deletingSnap, setDeletingSnap] = useState(false);
+
+  // Purge All Operational Data (Backup-First Guarded Workflow)
+  const [purgeModalOpen, setPurgeModalOpen] = useState(false);
+  const [creatingMandatoryBackup, setCreatingMandatoryBackup] = useState(false);
+  const [purgeAcknowledge, setPurgeAcknowledge] = useState(false);
+  const [purgeConfirmPhrase, setPurgeConfirmPhrase] = useState('');
+  const [purgingAll, setPurgingAll] = useState(false);
+  const [lastPurgeResult, setLastPurgeResult] = useState<{
+    deletedRowsTotal: number;
+    deletedTables: number;
+    prerequisiteSnapshotCode: string;
+    purgedAt: string;
+  } | null>(null);
 
   // Backup retention & schedule policy
   const [policyForm, setPolicyForm] = useState({
@@ -128,6 +148,56 @@ export function BackupCenterTab({
       setLoading(false);
     }
   }, [fetchBackupMeta, applyMeta, notify]);
+
+  const handleCreateMandatoryBackup = useCallback(async () => {
+    setCreatingMandatoryBackup(true);
+    try {
+      const label = `Backup Penuh Wajib Pra-Hapus · ${new Date().toLocaleDateString('id-ID')}`;
+      const createRes = await gatewayFetch('/api/backup', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          action: 'create_snapshot',
+          label,
+          notes:
+            'Backup penuh otomatis sebagai prasyarat wajib sebelum penghapusan seluruh data operasional.',
+          modules: CORE_BACKUP_MODULES,
+          includeAudit: true,
+        }),
+      });
+      const createJson = await createRes.json();
+      if (!createRes.ok) {
+        throw new Error(createJson.error || 'Gagal membuat backup penuh wajib.');
+      }
+      const snapId = createJson.snapshot?.id;
+      const snapCode = createJson.snapshot?.snapshot_code || 'backup-penuh';
+      if (snapId) {
+        const dlRes = await gatewayFetch(`/api/backup?snapshotId=${snapId}`);
+        if (dlRes.ok) {
+          const text = await dlRes.text();
+          const blob = new Blob([text], { type: 'application/json' });
+          const url = URL.createObjectURL(blob);
+          const a = document.createElement('a');
+          a.href = url;
+          a.download = `lentera-pustaka-${String(snapCode).toLowerCase()}.json`;
+          a.click();
+          URL.revokeObjectURL(url);
+        }
+      }
+      await loadMeta();
+      notify(
+        `Backup penuh wajib ${snapCode} berhasil dibuat & diunduh ke perangkat Anda.`,
+        'success'
+      );
+    } catch (err) {
+      notify(
+        err instanceof Error ? err.message : 'Gagal membuat backup penuh wajib.',
+        'error'
+      );
+    } finally {
+      setCreatingMandatoryBackup(false);
+    }
+  }, [loadMeta, notify]);
 
   useEffect(() => {
     let active = true;
@@ -881,6 +951,134 @@ export function BackupCenterTab({
         )}
       </section>
 
+      {/* Danger Zone: Purge All Operational Data (Backup-First Prerequisite) */}
+      {canWrite && meta && (
+        <section
+          aria-labelledby="danger-zone-purge-heading"
+          className="rounded-xl border border-[#F2C6C3] bg-[#FDF2F1]/55 p-5"
+        >
+          <div className="flex flex-col gap-4 md:flex-row md:items-start md:justify-between">
+            <div className="flex items-start gap-3">
+              <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg border border-[#F2C6C3] bg-white text-[#C94A43]">
+                <ShieldAlert className="h-5 w-5" />
+              </div>
+              <div>
+                <div className="flex flex-wrap items-center gap-2">
+                  <h3
+                    id="danger-zone-purge-heading"
+                    className="text-sm font-semibold text-[#7A231E]"
+                  >
+                    Zona Berbahaya — Hapus Seluruh Data Operasional
+                  </h3>
+                  <StatusIndicator
+                    status={
+                      meta.purgeEligibility?.hasEligibleBackup
+                        ? 'Backup Terpenuhi'
+                        : 'Wajib Backup Dahulu'
+                    }
+                  />
+                </div>
+                <p className="mt-1 max-w-2xl text-xs leading-relaxed text-[#7A231E]/85">
+                  Menghapus seluruh data operasional perpustakaan (katalog buku, eksemplar, anggota,
+                  transaksi peminjaman, pengembalian, denda, reservasi, jadwal baca, kelas,
+                  pengadaan, stock opname, notifikasi, dan akun non-admin). Sistem mewajibkan{' '}
+                  <strong className="font-semibold">backup penuh terverifikasi SHA-256</strong>{' '}
+                  yang dibuat maksimal{' '}
+                  <span className="font-mono font-semibold tabular-nums">
+                    {meta.purgeEligibility?.maxAgeMinutes ?? 30} menit
+                  </span>{' '}
+                  sebelum eksekusi.
+                </p>
+
+                {meta.purgeEligibility?.hasEligibleBackup &&
+                meta.purgeEligibility.eligibleSnapshot ? (
+                  <div className="mt-3 inline-flex flex-wrap items-center gap-x-3 gap-y-1 rounded-lg border border-emerald-200 bg-emerald-50/90 px-3 py-2 text-[11px] text-emerald-950">
+                    <span className="inline-flex items-center gap-1.5 font-semibold">
+                      <CheckCircle2 className="h-3.5 w-3.5 text-emerald-700" />
+                      Prasyarat Backup Penuh Terpenuhi
+                    </span>
+                    <span className="font-mono font-semibold text-[#1E2433]">
+                      {meta.purgeEligibility.eligibleSnapshot.snapshot_code}
+                    </span>
+                    <span className="font-mono tabular-nums text-emerald-800">
+                      ({meta.purgeEligibility.eligibleSnapshot.total_records.toLocaleString('id-ID')}{' '}
+                      rekord · berlaku {meta.purgeEligibility.eligibleSnapshot.expiresInMinutes} menit
+                      lagi)
+                    </span>
+                  </div>
+                ) : (
+                  <div className="mt-3 inline-flex items-center gap-2 rounded-lg border border-[#E6B3AF] bg-white/90 px-3 py-2 text-[11px] text-[#9E352F]">
+                    <Lock className="h-3.5 w-3.5 shrink-0" />
+                    <span>
+                      {meta.purgeEligibility?.reason ||
+                        'Terkunci: Buat dan unduh backup penuh terlebih dahulu sebelum menghapus seluruh data.'}
+                    </span>
+                  </div>
+                )}
+
+                {lastPurgeResult && (
+                  <div className="mt-3 rounded-lg border border-[#E7E4DC] bg-white px-3.5 py-2.5 text-xs text-[#1E2433]">
+                    <p className="font-semibold text-[#1E2433]">
+                      Pembersihan data selesai pada{' '}
+                      <span className="font-mono tabular-nums">
+                        {lastPurgeResult.purgedAt.slice(0, 19).replace('T', ' ')} UTC
+                      </span>
+                    </p>
+                    <p className="mt-0.5 text-[11px] text-[#5C5E64]">
+                      Sebanyak{' '}
+                      <span className="font-mono font-semibold tabular-nums text-[#C94A43]">
+                        {lastPurgeResult.deletedRowsTotal.toLocaleString('id-ID')}
+                      </span>{' '}
+                      rekord dihapus dari{' '}
+                      <span className="font-mono tabular-nums">{lastPurgeResult.deletedTables}</span>{' '}
+                      tabel operasional. Snapshot prasyarat{' '}
+                      <code className="font-mono font-semibold text-[#222B3A]">
+                        {lastPurgeResult.prerequisiteSnapshotCode}
+                      </code>{' '}
+                      tetap tersimpan di daftar Riwayat Snapshot di atas untuk pemulihan kapan saja.
+                    </p>
+                  </div>
+                )}
+              </div>
+            </div>
+
+            <div className="flex shrink-0 flex-wrap items-center gap-2 md:flex-col md:items-end">
+              {isSuperAdmin ? (
+                <>
+                  {!meta.purgeEligibility?.hasEligibleBackup && (
+                    <Button
+                      size="sm"
+                      variant="secondary"
+                      loading={creatingMandatoryBackup}
+                      onClick={handleCreateMandatoryBackup}
+                    >
+                      <HardDriveDownload className="h-3.5 w-3.5" />
+                      1. Buat &amp; Unduh Backup Penuh Wajib
+                    </Button>
+                  )}
+                  <Button
+                    size="sm"
+                    variant="danger"
+                    onClick={() => {
+                      setPurgeAcknowledge(false);
+                      setPurgeConfirmPhrase('');
+                      setPurgeModalOpen(true);
+                    }}
+                  >
+                    <Trash2 className="h-3.5 w-3.5" />
+                    Hapus Seluruh Data…
+                  </Button>
+                </>
+              ) : (
+                <div className="rounded-lg border border-[#E6B3AF] bg-white px-3 py-2 text-[11px] font-medium text-[#9E352F]">
+                  Khusus peran Super Admin
+                </div>
+              )}
+            </div>
+          </div>
+        </section>
+      )}
+
       {/* Restore Verification & Diff Preview Modal */}
       <Modal
         open={Boolean(verifyResult)}
@@ -1072,6 +1270,242 @@ export function BackupCenterTab({
         variant="danger"
         loading={deletingSnap}
       />
+
+      {/* Guided Backup-First Purge All Operational Data Modal */}
+      <Modal
+        open={purgeModalOpen}
+        onClose={() => {
+          if (!purgingAll && !creatingMandatoryBackup) {
+            setPurgeModalOpen(false);
+          }
+        }}
+        title="Hapus Seluruh Data Operasional"
+        description="Proses berisiko tinggi dengan pengaman berlapis. Wajib memiliki backup penuh terbaru sebelum konfirmasi aktif."
+        maxWidth="max-w-2xl"
+      >
+        {meta && (
+          <div className="space-y-4">
+            {/* Step 1: Mandatory Full Backup Prerequisite */}
+            <div
+              className={`rounded-lg border p-4 ${
+                meta.purgeEligibility?.hasEligibleBackup
+                  ? 'border-emerald-200 bg-emerald-50/70'
+                  : 'border-[#E6B3AF] bg-[#FDF2F1]'
+              }`}
+            >
+              <div className="flex flex-wrap items-start justify-between gap-3">
+                <div className="flex items-start gap-2.5">
+                  {meta.purgeEligibility?.hasEligibleBackup ? (
+                    <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0 text-emerald-700" />
+                  ) : (
+                    <Lock className="mt-0.5 h-4 w-4 shrink-0 text-[#C94A43]" />
+                  )}
+                  <div>
+                    <p
+                      className={`text-xs font-semibold ${
+                        meta.purgeEligibility?.hasEligibleBackup
+                          ? 'text-emerald-950'
+                          : 'text-[#9E352F]'
+                      }`}
+                    >
+                      Langkah 1 (Wajib): Backup Penuh Terverifikasi SHA-256
+                    </p>
+                    {meta.purgeEligibility?.hasEligibleBackup &&
+                    meta.purgeEligibility.eligibleSnapshot ? (
+                      <div className="mt-1 space-y-0.5 text-[11px] text-emerald-900">
+                        <p>
+                          Snapshot{' '}
+                          <code className="font-mono font-semibold">
+                            {meta.purgeEligibility.eligibleSnapshot.snapshot_code}
+                          </code>{' '}
+                          · {meta.purgeEligibility.eligibleSnapshot.label} — terverifikasi valid.
+                        </p>
+                        <p className="font-mono tabular-nums text-emerald-800">
+                          {meta.purgeEligibility.eligibleSnapshot.total_records.toLocaleString(
+                            'id-ID'
+                          )}{' '}
+                          rekord · SHA-256{' '}
+                          {meta.purgeEligibility.eligibleSnapshot.checksum.slice(0, 14)}… · berlaku{' '}
+                          {meta.purgeEligibility.eligibleSnapshot.expiresInMinutes} menit lagi
+                        </p>
+                      </div>
+                    ) : (
+                      <p className="mt-1 text-[11px] text-[#9E352F]">
+                        {meta.purgeEligibility?.reason ||
+                          'Belum ada backup penuh yang memenuhi syarat. Buat dan unduh backup penuh terlebih dahulu untuk membuka tombol hapus.'}
+                      </p>
+                    )}
+                  </div>
+                </div>
+
+                <Button
+                  size="sm"
+                  variant={meta.purgeEligibility?.hasEligibleBackup ? 'secondary' : 'primary'}
+                  loading={creatingMandatoryBackup}
+                  disabled={purgingAll}
+                  onClick={handleCreateMandatoryBackup}
+                >
+                  <HardDriveDownload className="h-3.5 w-3.5" />
+                  {meta.purgeEligibility?.hasEligibleBackup
+                    ? 'Buat Backup Baru & Unduh'
+                    : 'Buat & Unduh Backup Penuh'}
+                </Button>
+              </div>
+            </div>
+
+            {/* Step 2: Impact Summary (Deleted vs Preserved) */}
+            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+              <div className="rounded-lg border border-[#F2C6C3] bg-white p-3.5">
+                <p className="text-[11px] font-semibold uppercase tracking-wider text-[#9E352F]">
+                  Akan Dihapus Permanen
+                </p>
+                <p className="mt-1 font-mono text-lg font-bold text-[#C94A43] tabular-nums">
+                  {(meta.purgeEligibility?.operationalRecordCount ?? 0).toLocaleString('id-ID')}{' '}
+                  <span className="text-xs font-medium text-[#7A231E]">rekord operasional</span>
+                </p>
+                <ul className="mt-2 space-y-1 text-[11px] text-[#5C5E64]">
+                  <li>• Katalog buku, eksemplar, kategori, penulis, penerbit, rak</li>
+                  <li>• Data anggota, antrean pendaftaran &amp; akun pengguna lain</li>
+                  <li>• Transaksi peminjaman, pengembalian, reservasi, denda &amp; bayar</li>
+                  <li>• Kelas SD, daftar siswa, jadwal baca &amp; absensi literasi</li>
+                  <li>• Pemasok, pengadaan buku, stock opname &amp; notifikasi</li>
+                </ul>
+              </div>
+
+              <div className="rounded-lg border border-[#E7E4DC] bg-[#FAF9F5] p-3.5">
+                <p className="text-[11px] font-semibold uppercase tracking-wider text-[#222B3A]">
+                  Tetap Dipertahankan Aman
+                </p>
+                <ul className="mt-2 space-y-2 text-[11px] text-[#4A4945]">
+                  {PRESERVED_SYSTEM_ITEMS.map((item) => (
+                    <li key={item.title}>
+                      <span className="font-semibold text-[#1E2433]">{item.title}:</span>{' '}
+                      {item.detail}
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            </div>
+
+            {/* Step 3: Double Confirmation (Locked until Step 1 satisfied) */}
+            <div
+              className={`space-y-3 rounded-lg border p-4 transition-opacity ${
+                meta.purgeEligibility?.hasEligibleBackup
+                  ? 'border-[#E6B3AF] bg-[#FDF2F1]/70 opacity-100'
+                  : 'border-[#E7E4DC] bg-[#F4F3EE] opacity-60'
+              }`}
+            >
+              <p className="text-xs font-semibold text-[#1E2433]">
+                Langkah 2: Konfirmasi Ganda Super Admin
+              </p>
+
+              <label className="flex cursor-pointer items-start gap-2.5 text-xs text-[#1E2433]">
+                <input
+                  type="checkbox"
+                  disabled={!meta.purgeEligibility?.hasEligibleBackup || purgingAll}
+                  checked={purgeAcknowledge}
+                  onChange={(e) => setPurgeAcknowledge(e.target.checked)}
+                  className="mt-0.5 h-4 w-4 rounded border-[#CFCAC0] accent-[#C94A43]"
+                />
+                <span>
+                  Saya menyadari seluruh data operasional perpustakaan akan dihapus dan telah
+                  memastikan salinan backup penuh terbaru tersedia dengan aman.
+                </span>
+              </label>
+
+              <div>
+                <p className="text-[11px] text-[#7A231E]">
+                  Ketik frasa berikut dalam huruf kapital:{' '}
+                  <code className="rounded bg-white px-1.5 py-0.5 font-mono font-bold text-[#9E352F]">
+                    {PURGE_CONFIRMATION_PHRASE}
+                  </code>
+                </p>
+                <input
+                  type="text"
+                  disabled={!meta.purgeEligibility?.hasEligibleBackup || purgingAll}
+                  value={purgeConfirmPhrase}
+                  onChange={(e) => setPurgeConfirmPhrase(e.target.value)}
+                  placeholder={`Ketik ${PURGE_CONFIRMATION_PHRASE}`}
+                  aria-label="Ketik HAPUS SEMUA DATA untuk konfirmasi penghapusan seluruh data"
+                  className="mt-1.5 h-9 w-full rounded-lg border border-[#E6B3AF] bg-white px-3 font-mono text-xs text-[#1E2433] focus:border-[#C94A43] focus:outline-none disabled:cursor-not-allowed disabled:bg-[#F4F3EE]"
+                />
+              </div>
+            </div>
+
+            <div className="flex flex-wrap items-center justify-end gap-2 border-t border-[#E7E4DC] pt-4">
+              <Button
+                variant="secondary"
+                disabled={purgingAll || creatingMandatoryBackup}
+                onClick={() => setPurgeModalOpen(false)}
+              >
+                Batal
+              </Button>
+              <Button
+                variant="danger"
+                loading={purgingAll}
+                disabled={
+                  !meta.purgeEligibility?.hasEligibleBackup ||
+                  !purgeAcknowledge ||
+                  purgeConfirmPhrase.trim() !== PURGE_CONFIRMATION_PHRASE ||
+                  creatingMandatoryBackup
+                }
+                onClick={async () => {
+                  const snapId = meta.purgeEligibility?.eligibleSnapshot?.id;
+                  if (!snapId) return;
+                  setPurgingAll(true);
+                  try {
+                    const res = await gatewayFetch('/api/backup', {
+                      method: 'POST',
+                      headers: { 'Content-Type': 'application/json' },
+                      body: JSON.stringify({
+                        action: 'purge_all_data',
+                        prerequisiteSnapshotId: snapId,
+                        acknowledgeIrreversible: purgeAcknowledge,
+                        confirmationPhrase: purgeConfirmPhrase.trim(),
+                      }),
+                    });
+                    const json = await res.json();
+                    if (!res.ok) {
+                      throw new Error(json.error || 'Gagal menghapus seluruh data operasional.');
+                    }
+                    setLastPurgeResult({
+                      deletedRowsTotal: Number(json.deletedRowsTotal || 0),
+                      deletedTables: Number(json.deletedTables || 0),
+                      prerequisiteSnapshotCode: String(
+                        json.prerequisiteSnapshotCode ||
+                          meta.purgeEligibility?.eligibleSnapshot?.snapshot_code ||
+                          ''
+                      ),
+                      purgedAt: String(json.purgedAt || new Date().toISOString()),
+                    });
+                    setPurgeModalOpen(false);
+                    setPurgeAcknowledge(false);
+                    setPurgeConfirmPhrase('');
+                    await loadMeta();
+                    await onSystemMutated();
+                    notify(
+                      `Seluruh data operasional (${Number(json.deletedRowsTotal || 0).toLocaleString('id-ID')} rekord) berhasil dihapus. Backup prasyarat ${json.prerequisiteSnapshotCode} tetap tersimpan untuk pemulihan.`,
+                      'success'
+                    );
+                  } catch (err) {
+                    notify(
+                      err instanceof Error
+                        ? err.message
+                        : 'Gagal menghapus seluruh data operasional.',
+                      'error'
+                    );
+                  } finally {
+                    setPurgingAll(false);
+                  }
+                }}
+              >
+                <Trash2 className="h-4 w-4" />
+                Hapus Seluruh Data Sekarang
+              </Button>
+            </div>
+          </div>
+        )}
+      </Modal>
     </div>
   );
 }

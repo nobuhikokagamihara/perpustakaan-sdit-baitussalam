@@ -1,12 +1,21 @@
 'use client';
 
-import {
-  clearFirestoreReadCache,
-  dispatchFirestoreApi,
-  fetchFirestoreCatalogPublic,
-  type FirebaseSessionActor,
-} from '@/lib/firebase/library-store';
+import type { FirebaseSessionActor } from '@/lib/firebase/library-store';
 import { IS_FIRESTORE_ONLY_MODE } from '@/lib/firebase/client';
+
+type LibraryStoreModule = typeof import('@/lib/firebase/library-store');
+let libraryStorePromise: Promise<LibraryStoreModule> | null = null;
+let loadedLibraryStore: LibraryStoreModule | null = null;
+
+function loadLibraryStore(): Promise<LibraryStoreModule> {
+  if (!libraryStorePromise) {
+    libraryStorePromise = import('@/lib/firebase/library-store').then((mod) => {
+      loadedLibraryStore = mod;
+      return mod;
+    });
+  }
+  return libraryStorePromise;
+}
 
 let activeFirebaseActor: FirebaseSessionActor | null = null;
 let authReady = false;
@@ -14,7 +23,7 @@ let authReadyResolvers: Array<() => void> = [];
 
 export function setGatewayFirebaseActor(actor: FirebaseSessionActor | null) {
   if (!actor || (activeFirebaseActor && activeFirebaseActor.uid !== actor.uid)) {
-    clearFirestoreReadCache();
+    loadedLibraryStore?.clearFirestoreReadCache();
   }
   activeFirebaseActor = actor;
 }
@@ -100,6 +109,7 @@ export async function gatewayFetch(input: string, init?: RequestInit): Promise<R
 
   if (activeFirebaseActor && input.startsWith('/api/') && !input.startsWith('/api/auth/')) {
     const parsedBody = parseRequestBody(init?.body);
+    const { dispatchFirestoreApi } = await loadLibraryStore();
     return dispatchFirestoreApi(input, method, parsedBody, activeFirebaseActor);
   }
 
@@ -108,6 +118,7 @@ export async function gatewayFetch(input: string, init?: RequestInit): Promise<R
       const url = new URL(input, 'http://localhost:3000');
       const q = url.searchParams.get('q') || '';
       const categoryId = url.searchParams.get('categoryId') || '';
+      const { fetchFirestoreCatalogPublic } = await loadLibraryStore();
       const fsData = await fetchFirestoreCatalogPublic(q, categoryId, false);
       if (fsData) {
         return new Response(JSON.stringify(fsData), {
